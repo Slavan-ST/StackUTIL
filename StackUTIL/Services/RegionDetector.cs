@@ -1,4 +1,6 @@
-﻿using Microsoft.Extensions.Logging;
+﻿using DebugInterceptor.Models;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 using System.Drawing;
 
 namespace DebugInterceptor.Services
@@ -9,18 +11,12 @@ namespace DebugInterceptor.Services
     public class RegionDetector
     {
         private readonly ILogger<RegionDetector> _logger;
+        private readonly DebugInterceptorSettings _settings;
 
-        // Настройки (можно вынести в config при необходимости)
-        private const int PixelDiffThreshold = 5;
-        private const int MinRegionArea = 500;
-        private const int MinTooltipW = 100, MaxTooltipW = 900;
-        private const int MinTooltipH = 80, MaxTooltipH = 700;
-        private const int ConnectedComponentMinSize = 15;
-        private const int RegionPadding = 0;
-
-        public RegionDetector(ILogger<RegionDetector> logger)
+        public RegionDetector(ILogger<RegionDetector> logger, IOptions<DebugInterceptorSettings> settings)
         {
             _logger = logger;
+            _settings = settings.Value;
         }
 
         public List<Rectangle> FindChangedRegions(Bitmap baseline, Bitmap current)
@@ -31,7 +27,7 @@ namespace DebugInterceptor.Services
             var changedCoords = DetectChangedPixels(baseline, current);
             _logger.LogDebug("🔍 Найдено {Count} изменённых пикселей", changedCoords.Count);
 
-            if (changedCoords.Count < MinRegionArea)
+            if (changedCoords.Count < _settings.MinRegionArea)
                 return new List<Rectangle>();
 
             var regions = FindConnectedComponents(changedCoords, current.Width, current.Height);
@@ -40,21 +36,21 @@ namespace DebugInterceptor.Services
             var validRegions = regions.Where(r =>
             {
                 int area = r.Width * r.Height;
-                return area >= MinRegionArea &&
-                       r.Width >= MinTooltipW && r.Width <= MaxTooltipW &&
-                       r.Height >= MinTooltipH && r.Height <= MaxTooltipH;
+                return area >= _settings.MinRegionArea &&
+                       r.Width >= _settings.MinTooltipWidth && r.Width <= _settings.MaxTooltipWidth &&
+                       r.Height >= _settings.MinTooltipHeight && r.Height <= _settings.MaxTooltipHeight;
             }).ToList();
 
             if (validRegions.Count == 0)
             {
                 _logger.LogDebug("⚠ Нет регионов в строгих границах, расширяем поиск");
-                validRegions = regions.Where(r => r.Width * r.Height >= MinRegionArea).ToList();
+                validRegions = regions.Where(r => r.Width * r.Height >= _settings.MinRegionArea).ToList();
             }
 
             var expandedRegions = validRegions.Select(r =>
             {
                 var expanded = ExpandRegionToContent(r, current, baseline);
-                var pad = RegionPadding;
+                var pad = _settings.RegionPadding;
                 int x = Math.Max(0, expanded.X - pad);
                 int y = Math.Max(0, expanded.Y - pad);
                 int right = Math.Min(current.Width, expanded.Right + pad);
@@ -94,7 +90,7 @@ namespace DebugInterceptor.Services
                     int diff = Math.Abs((b.R + b.G + b.B) - (c.R + c.G + c.B)) / 3;
                     totalPixels++;
 
-                    if (diff > PixelDiffThreshold) changedPixels++;
+                    if (diff > _settings.PixelDiffThreshold) changedPixels++;
                 }
 
             return totalPixels > 0 && (double)changedPixels / totalPixels > 0.2;
@@ -113,7 +109,7 @@ namespace DebugInterceptor.Services
                     int bBrightness = (b.R + b.G + b.B) / 3;
                     int cBrightness = (c.R + c.G + c.B) / 3;
 
-                    if (cBrightness > 50 && Math.Abs(bBrightness - cBrightness) > PixelDiffThreshold)
+                    if (cBrightness > 50 && Math.Abs(bBrightness - cBrightness) > _settings.PixelDiffThreshold)
                         changed.Add((x, y));
                 }
             return changed;
@@ -156,7 +152,7 @@ namespace DebugInterceptor.Services
                     }
                 }
 
-                if (count >= ConnectedComponentMinSize)
+                if (count >= _settings.ConnectedComponentMinSize)
                     regions.Add(new Rectangle(minX, minY, maxX - minX + 1, maxY - minY + 1));
             }
             return regions;

@@ -1,4 +1,6 @@
-﻿using Microsoft.Extensions.Logging;
+﻿using DebugInterceptor.Models;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 using System.Drawing;
 using System.Drawing.Imaging;
 using System.IO;
@@ -12,12 +14,16 @@ namespace DebugInterceptor.Services
     public class TooltipValidator
     {
         private readonly ILogger<TooltipValidator> _logger;
+        private readonly DebugInterceptorSettings _settings;
         private readonly string _tessDataPath;
 
-        public TooltipValidator(ILogger<TooltipValidator> logger, string tessDataPath)
+        public TooltipValidator(
+            ILogger<TooltipValidator> logger,
+            IOptions<DebugInterceptorSettings> settings)
         {
             _logger = logger;
-            _tessDataPath = tessDataPath;
+            _settings = settings.Value;
+            _tessDataPath = Path.Combine(AppContext.BaseDirectory, _settings.TessDataPath);
         }
 
         /// <summary>
@@ -27,7 +33,7 @@ namespace DebugInterceptor.Services
         {
             try
             {
-                using var engine = new TesseractEngine(_tessDataPath, "rus", EngineMode.Default);
+                using var engine = new TesseractEngine(_tessDataPath, _settings.OcrLanguage, EngineMode.Default);
                 engine.DefaultPageSegMode = PageSegMode.SingleBlock;
 
                 var tempPath = Path.Combine(Path.GetTempPath(), $"chk_{Guid.NewGuid():N}.png");

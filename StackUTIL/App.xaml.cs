@@ -1,12 +1,13 @@
-﻿using DebugInterceptor.Services;
+﻿using DebugInterceptor.Models;
+using DebugInterceptor.Services;
 using DebugInterceptor.ViewModels;
 using DebugInterceptor.Views;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
-using System.Windows;
-using DebugInterceptor.Models;
+using Microsoft.Extensions.Options;
 using System.IO;
+using System.Windows;
 
 namespace StackUTIL
 {
@@ -29,37 +30,77 @@ namespace StackUTIL
                 .ConfigureServices((context, services) =>
                 {
                     // ==========================================
+                    // ⚙️ Настройки через IOptions<T>
+                    // ==========================================
+                    services.Configure<DebugInterceptorSettings>(
+                        context.Configuration.GetSection("DebugInterceptor"));
+
+                    // ==========================================
                     // 📦 Основные сервисы (Singleton)
                     // ==========================================
                     services.AddSingleton<ScreenCaptureService>();
                     services.AddSingleton<OcrService>();
                     services.AddSingleton<DebugDataParser>();
-                    services.AddSingleton<RegionDetector>();
                     services.AddSingleton<BitmapUtility>();
-                    services.AddSingleton<DebugResultProcessor>();
                     services.AddSingleton<INotificationService, NotificationService>();
+
+                    // Сервисы, зависящие от настроек (передаём IOptions<T>, не .Value!)
+                    services.AddSingleton<RegionDetector>(sp =>
+                    {
+                        var logger = sp.GetRequiredService<ILogger<RegionDetector>>();
+                        var settings = sp.GetRequiredService<IOptions<DebugInterceptorSettings>>();
+                        return new RegionDetector(logger, settings);  // ← IOptions<T>
+                    });
+
                     services.AddSingleton<TooltipValidator>(sp =>
-                        new TooltipValidator(
-                            sp.GetRequiredService<ILogger<TooltipValidator>>(),
-                            tessDataPath));
+                    {
+                        var logger = sp.GetRequiredService<ILogger<TooltipValidator>>();
+                        var settings = sp.GetRequiredService<IOptions<DebugInterceptorSettings>>();
+                        // Путь вычисляется внутри конструктора TooltipValidator
+                        return new TooltipValidator(logger, settings);
+                    });
+
+                    services.AddSingleton<DebugResultProcessor>(sp =>
+                    {
+                        var logger = sp.GetRequiredService<ILogger<DebugResultProcessor>>();
+                        var ocr = sp.GetRequiredService<OcrService>();
+                        var parser = sp.GetRequiredService<DebugDataParser>();
+                        var serviceProvider = sp;
+                        var bitmapUtil = sp.GetRequiredService<BitmapUtility>();
+                        return new DebugResultProcessor(logger, ocr, parser, serviceProvider, bitmapUtil);
+                    });
 
                     // ==========================================
-                    // 🔥 DebugInterceptService
+                    // 🔥 DebugInterceptService (оркестратор)
                     // ==========================================
-                    services.AddSingleton<DebugInterceptService>();
+                    services.AddSingleton<DebugInterceptService>(sp =>
+                    {
+                        return new DebugInterceptService(
+                            sp.GetRequiredService<ILogger<DebugInterceptService>>(),
+                            sp.GetRequiredService<ScreenCaptureService>(),
+                            sp.GetRequiredService<OcrService>(),
+                            sp.GetRequiredService<DebugDataParser>(),
+                            sp.GetRequiredService<RegionDetector>(),
+                            sp.GetRequiredService<BitmapUtility>(),
+                            sp.GetRequiredService<TooltipValidator>(),
+                            sp.GetRequiredService<DebugResultProcessor>(),
+                            sp,
+                            sp.GetRequiredService<INotificationService>(),
+                            sp.GetRequiredService<IOptions<DebugInterceptorSettings>>()  // ← передаём IOptions<T>
+                        );
+                    });
 
                     // ==========================================
                     // 🪟 UI: Окна и ViewModel (Transient)
                     // ==========================================
                     services.AddTransient<DebugResultWindow>();
                     services.AddTransient<DebugResultViewModel>();
+                    services.AddTransient<MainWindow>();
 
                     // ==========================================
                     // 📡 TrayService (фоновый сервис)
                     // ==========================================
-                    // 1. Регистрируем как Singleton — для ручного получения
                     services.AddSingleton<TrayService>();
-                    // 2. Регистрируем как IHostedService — для автозапуска
                     services.AddHostedService(sp => sp.GetRequiredService<TrayService>());
                 })
                 .Build();
@@ -86,15 +127,12 @@ namespace StackUTIL
                 return;
             }
 
-            // 👇 1. Получаем TrayService из контейнера (теперь работает!)
             var trayService = _host.Services.GetRequiredService<TrayService>();
             _logger.LogDebug($"🔍 TrayService из контейнера: {trayService.GetHashCode()}");
 
-            // 👇 2. Создаём окно и передаём ему ссылку на сервис
             _mainWindow = new MainWindow();
             trayService?.SetMainWindow(_mainWindow);
             _logger.LogTrace($"🪟 MainWindow создан (HashCode: {_mainWindow.GetHashCode()})");
-
 
             _logger.LogTrace("🪟 MainWindow.Loaded: инициализация хоткеев");
             InitializeHotkeysSafely(_mainWindow);
