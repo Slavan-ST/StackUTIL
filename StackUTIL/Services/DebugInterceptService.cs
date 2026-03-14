@@ -41,7 +41,8 @@ namespace DebugInterceptor.Services
         private const int RegionPadding = 0;
         private const int ExpansionMargin = 10;
         private readonly RegionDetector _regionDetector;
-        private readonly BitmapUtility _bitmapUtility;  
+        private readonly BitmapUtility _bitmapUtility;
+        private readonly TooltipValidator _tooltipValidator;  // ← новое поле
 
         #endregion
 
@@ -54,6 +55,7 @@ namespace DebugInterceptor.Services
             DebugDataParser parser,
             RegionDetector regionDetector,
             BitmapUtility bitmapUtility,  // ← новый параметр
+            TooltipValidator tooltipValidator,  // ← новый параметр
             IServiceProvider serviceProvider)
         {
             _logger = logger;
@@ -62,6 +64,7 @@ namespace DebugInterceptor.Services
             _parser = parser;
             _serviceProvider = serviceProvider;
             _bitmapUtility = bitmapUtility;  // ← инициализация
+            _tooltipValidator = tooltipValidator;  // ← инициализация
             _regionDetector = regionDetector;  
         }
 
@@ -129,7 +132,7 @@ namespace DebugInterceptor.Services
                     using var cropped = _bitmapUtility.CropBitmap(current, region);
                     _bitmapUtility.SaveDebugWithRegion(current, region, "region_debug");
 
-                    if (!ContainsTooltipHeader(cropped))
+                    if (!_tooltipValidator.ContainsTooltipHeader(cropped))
                         _logger.LogWarning("⚠ Заголовок 'Структура записи' не найден, продолжаем...");
 
                     await ProcessAndShowResult(cropped);
@@ -145,31 +148,6 @@ namespace DebugInterceptor.Services
 
         #region OCR & Processing
 
-        // ═══════════════════════════════════════════════════════
-        // 🔹 OCR-валидация заголовка
-        // ═══════════════════════════════════════════════════════
-        private bool ContainsTooltipHeader(Bitmap bitmap)
-        {
-            try
-            {
-                var tessDataPath = Path.Combine(AppContext.BaseDirectory, "tessdata");
-                using var engine = new TesseractEngine(tessDataPath, "rus", Tesseract.EngineMode.Default);
-                engine.DefaultPageSegMode = Tesseract.PageSegMode.SingleBlock;
-
-                var tempPath = Path.Combine(Path.GetTempPath(), $"chk_{Guid.NewGuid():N}.png");
-                try
-                {
-                    bitmap.Save(tempPath, System.Drawing.Imaging.ImageFormat.Png);
-                    using var pix = Tesseract.Pix.LoadFromFile(tempPath);
-                    using var page = engine.Process(pix);
-                    var text = page.GetText()?.ToLower() ?? "";
-                    _logger.LogDebug("🔍 Заголовок: '{Text}'", text[..Math.Min(100, text.Length)]);
-                    return text.Contains("структура") && text.Contains("запис");
-                }
-                finally { if (File.Exists(tempPath)) File.Delete(tempPath); }
-            }
-            catch (Exception ex) { _logger.LogWarning(ex, "⚠ Ошибка проверки заголовка"); return false; }
-        }
 
         // ═══════════════════════════════════════════════════════
         // 🔹 Обработка результата

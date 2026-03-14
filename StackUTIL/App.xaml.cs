@@ -6,6 +6,7 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using System.Windows;
 using DebugInterceptor.Models;
+using System.IO;
 
 namespace StackUTIL
 {
@@ -17,6 +18,7 @@ namespace StackUTIL
 
         public App()
         {
+            var tessDataPath = Path.Combine(AppContext.BaseDirectory, "tessdata");
             _host = Host.CreateDefaultBuilder()
                 .ConfigureLogging(logging =>
                 {
@@ -34,6 +36,10 @@ namespace StackUTIL
                     services.AddSingleton<DebugDataParser>();
                     services.AddSingleton<RegionDetector>();
                     services.AddSingleton<BitmapUtility>();
+                    services.AddSingleton<TooltipValidator>(sp =>
+                        new TooltipValidator(
+                            sp.GetRequiredService<ILogger<TooltipValidator>>(),
+                            tessDataPath));
 
                     // ==========================================
                     // 🔥 DebugInterceptService
