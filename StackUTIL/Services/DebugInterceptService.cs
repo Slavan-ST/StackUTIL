@@ -7,16 +7,18 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using System.Drawing;
 using System.Drawing.Imaging;
+using System.IO;
 using System.Text.RegularExpressions;
 using System.Windows;
 using MessageBox = System.Windows.MessageBox;
 using Tesseract;
-using System.IO;
 
 namespace DebugInterceptor.Services
 {
     public class DebugInterceptService : BackgroundService
     {
+        #region Fields & Settings
+
         private readonly ILogger<DebugInterceptService> _logger;
         private readonly ScreenCaptureService _captureService;
         private readonly OcrService _ocrService;
@@ -38,13 +40,19 @@ namespace DebugInterceptor.Services
         private const int MinTooltipH = 80, MaxTooltipH = 700;
         private const int ConnectedComponentMinSize = 15;
         private const int RegionPadding = 0;
-        private const int ExpansionMargin = 10; // 🔹 Новое: доп. расширение
+        private const int ExpansionMargin = 10;
+        private readonly RegionDetector _regionDetector;
+
+        #endregion
+
+        #region Constructor & Lifecycle
 
         public DebugInterceptService(
             ILogger<DebugInterceptService> logger,
             ScreenCaptureService captureService,
             OcrService ocrService,
             DebugDataParser parser,
+            RegionDetector regionDetector,
             IServiceProvider serviceProvider)
         {
             _logger = logger;
@@ -52,6 +60,7 @@ namespace DebugInterceptor.Services
             _ocrService = ocrService;
             _parser = parser;
             _serviceProvider = serviceProvider;
+            _regionDetector = regionDetector;  
         }
 
         public void InitializeHotkeys(Window mainWindow)
@@ -80,6 +89,10 @@ namespace DebugInterceptor.Services
             await base.StopAsync(cancellationToken);
         }
 
+        #endregion
+
+        #region Capture Handler
+
         // ═══════════════════════════════════════════════════════
         // 🔹 Единый обработчик: скрин1 → задержка → скрин2 → анализ
         // ═══════════════════════════════════════════════════════
@@ -90,7 +103,6 @@ namespace DebugInterceptor.Services
             {
                 _logger.LogDebug("🔔 Запуск авто-захвата...");
 
-                // 1️⃣ Скриншот 1 (базовый)
                 baseline = _captureService.CaptureFullScreen();
                 if (baseline == null) { ShowError("Не удалось сделать базовый скриншот"); return; }
                 _logger.LogDebug("📸 Базовый: {W}x{H}", baseline.Width, baseline.Height);
@@ -98,30 +110,23 @@ namespace DebugInterceptor.Services
                 _logger.LogInformation("⏳ Ожидание {Ms} мс...", CaptureDelayMs);
                 await Task.Delay(CaptureDelayMs, token);
 
-                // 2️⃣ Скриншот 2 (текущий)
                 current = _captureService.CaptureFullScreen();
                 if (current == null) { ShowError("Не удалось сделать текущий скриншот"); return; }
                 _logger.LogDebug("📸 Текущий: {W}x{H}", current.Width, current.Height);
 
-                // 3️⃣ Сравнение: находим регионы во 2-м скрине, отличные от 1-го
-                var regions = FindChangedRegions(baseline, current);
+                var regions = _regionDetector.FindChangedRegions(baseline, current);
                 if (regions.Count == 0) { ShowNoChangesWarning(); return; }
 
                 _logger.LogInformation("📦 Найдено регионов: {Count}", regions.Count);
 
-                // 4️⃣ Обработка каждого региона: из current → OCR + отладка
                 foreach (var region in regions)
                 {
                     _logger.LogInformation("📐 Регион: {X},{Y} {W}x{H}",
                         region.X, region.Y, region.Width, region.Height);
 
-                    // 🔹 Вырезаем область из ТЕКУЩЕГО скрина (не baseline!)
                     using var cropped = CropBitmap(current, region);
-
-                    // 🔹 Сохраняем отладочное изображение с обводкой региона
                     SaveDebugWithRegion(current, region, "region_debug");
 
-                    // 🔹 Передаём в OCR
                     if (!ContainsTooltipHeader(cropped))
                         _logger.LogWarning("⚠ Заголовок 'Структура записи' не найден, продолжаем...");
 
@@ -133,188 +138,19 @@ namespace DebugInterceptor.Services
             finally { baseline?.Dispose(); current?.Dispose(); }
         }, token);
 
-        // ═══════════════════════════════════════════════════════
-        // 🔹 Поиск изменённых регионов: сравниваем два скрина
-        // ═══════════════════════════════════════════════════════
-        private List<Rectangle> FindChangedRegions(Bitmap baseline, Bitmap current)
-        {
-            if (baseline.Width != current.Width || baseline.Height != current.Height)
-                return new List<Rectangle>();
+        #endregion
 
-            // 1️⃣ Находим координаты всех изменённых пикселей
-            var changedCoords = DetectChangedPixels(baseline, current);
-            _logger.LogDebug("🔍 Найдено {Count} изменённых пикселей", changedCoords.Count);
-
-            if (changedCoords.Count < MinRegionArea)
-                return new List<Rectangle>();
-
-            // 2️⃣ Группируем в связанные компоненты (регионы)
-            var regions = FindConnectedComponents(changedCoords, current.Width, current.Height);
-            _logger.LogDebug("📦 Найдено регионов до фильтрации: {Count}", regions.Count);
-
-            // 3️⃣ Фильтруем по размеру
-            var validRegions = regions.Where(r =>
-            {
-                int area = r.Width * r.Height;
-                return area >= MinRegionArea &&
-                       r.Width >= MinTooltipW && r.Width <= MaxTooltipW &&
-                       r.Height >= MinTooltipH && r.Height <= MaxTooltipH;
-            }).ToList();
-
-            if (validRegions.Count == 0)
-            {
-                _logger.LogDebug("⚠ Нет регионов в строгих границах, расширяем поиск");
-                validRegions = regions.Where(r => r.Width * r.Height >= MinRegionArea).ToList();
-            }
-
-            // 4️⃣  Расширяем каждый регион + padding
-            var expandedRegions = validRegions.Select(r =>
-            {
-                // 🔹 Сначала расширяем на основе анализа границ
-                var expanded = ExpandRegionToContent(r, current, baseline);
-
-                // 🔹 Затем добавляем фиксированный padding
-                var pad = RegionPadding;
-                int x = Math.Max(0, expanded.X - pad);
-                int y = Math.Max(0, expanded.Y - pad);
-                int right = Math.Min(current.Width, expanded.Right + pad);
-                int bottom = Math.Min(current.Height, expanded.Bottom + pad);
-
-                return new Rectangle(x, y, right - x, bottom - y);
-            }).ToList();
-
-            _logger.LogDebug("✅ Регионов после обработки: {Count}", expandedRegions.Count);
-            return expandedRegions;
-        }
+        #region Bitmap Helpers
 
         /// <summary>
-        /// 🔹 Расширяет регион до границ контента (пока есть отличия от baseline)
+        /// 🔹 Вырезает область из битмапа
         /// </summary>
-        private Rectangle ExpandRegionToContent(Rectangle initial, Bitmap current, Bitmap baseline)
+        private Bitmap CropBitmap(Bitmap source, Rectangle area)
         {
-            int left = initial.Left;
-            int top = initial.Top;
-            int right = initial.Right;
-            int bottom = initial.Bottom;
-
-            // 🔹 Расширяем влево
-            while (left > 0 && HasSignificantChanges(current, baseline, left - 1, top, left, bottom))
-                left--;
-
-            // 🔹 Расширяем вправо
-            while (right < current.Width && HasSignificantChanges(current, baseline, right, top, right + 1, bottom))
-                right++;
-
-            // 🔹 Расширяем вверх
-            while (top > 0 && HasSignificantChanges(current, baseline, left, top - 1, right, top))
-                top--;
-
-            // 🔹 Расширяем вниз
-            while (bottom < current.Height && HasSignificantChanges(current, baseline, left, bottom, right, bottom + 1))
-                bottom++;
-
-            return Rectangle.FromLTRB(left, top, right, bottom);
-        }
-
-        /// <summary>
-        /// 🔹 Проверяет, есть ли значимые изменения в указанной полосе
-        /// </summary>
-        private bool HasSignificantChanges(Bitmap current, Bitmap baseline, int x1, int y1, int x2, int y2)
-        {
-            int changedPixels = 0;
-            int totalPixels = 0;
-
-            for (int y = y1; y < y2; y++)
-            {
-                for (int x = x1; x < x2; x++)
-                {
-                    if (x < 0 || y < 0 || x >= current.Width || y >= current.Height) continue;
-
-                    var b = baseline.GetPixel(x, y);
-                    var c = current.GetPixel(x, y);
-
-                    int diff = Math.Abs((b.R + b.G + b.B) - (c.R + c.G + c.B)) / 3;
-                    totalPixels++;
-
-                    if (diff > PixelDiffThreshold)
-                        changedPixels++;
-                }
-            }
-
-            // Если хотя бы 20% пикселей в полосе изменились — расширяем
-            return totalPixels > 0 && (double)changedPixels / totalPixels > 0.2;
-        }
-
-        /// <summary>
-        /// 🔹 Детекция изменённых пикселей: ищем появление нового контента
-        /// </summary>
-        private List<(int x, int y)> DetectChangedPixels(Bitmap baseline, Bitmap current)
-        {
-            var changed = new List<(int x, int y)>();
-
-            for (int y = 0; y < baseline.Height; y++)
-            {
-                for (int x = 0; x < baseline.Width; x++)
-                {
-                    var b = baseline.GetPixel(x, y);
-                    var c = current.GetPixel(x, y);
-
-                    int bBrightness = (b.R + b.G + b.B) / 3;
-                    int cBrightness = (c.R + c.G + c.B) / 3;
-
-                    // Детектируем появление нового контента (тултип обычно светлее)
-                    if (cBrightness > 50 && Math.Abs(bBrightness - cBrightness) > PixelDiffThreshold)
-                        changed.Add((x, y));
-                }
-            }
-            return changed;
-        }
-
-        /// <summary>
-        /// 🔹 Поиск связанных компонентов (регионов) среди изменённых пикселей
-        /// </summary>
-        private List<Rectangle> FindConnectedComponents(List<(int x, int y)> pixels, int width, int height)
-        {
-            var visited = new HashSet<(int, int)>();
-            var regions = new List<Rectangle>();
-            var directions = new[] { (-1, 0), (1, 0), (0, -1), (0, 1) };
-
-            foreach (var start in pixels)
-            {
-                if (visited.Contains(start)) continue;
-
-                var queue = new Queue<(int, int)>();
-                queue.Enqueue(start);
-                visited.Add(start);
-
-                int minX = start.x, maxX = start.x;
-                int minY = start.y, maxY = start.y;
-                int count = 1;
-
-                while (queue.Count > 0)
-                {
-                    var (x, y) = queue.Dequeue();
-
-                    foreach (var (dx, dy) in directions)
-                    {
-                        var (nx, ny) = (x + dx, y + dy);
-                        if (nx < 0 || ny < 0 || nx >= width || ny >= height) continue;
-                        var key = (nx, ny);
-                        if (!visited.Contains(key) && pixels.Contains(key))
-                        {
-                            visited.Add(key);
-                            queue.Enqueue(key);
-                            minX = Math.Min(minX, nx); maxX = Math.Max(maxX, nx);
-                            minY = Math.Min(minY, ny); maxY = Math.Max(maxY, ny);
-                            count++;
-                        }
-                    }
-                }
-
-                if (count >= ConnectedComponentMinSize)
-                    regions.Add(new Rectangle(minX, minY, maxX - minX + 1, maxY - minY + 1));
-            }
-            return regions;
+            var cropped = new Bitmap(area.Width, area.Height);
+            using var g = Graphics.FromImage(cropped);
+            g.DrawImage(source, new Rectangle(0, 0, area.Width, area.Height), area, GraphicsUnit.Pixel);
+            return cropped;
         }
 
         /// <summary>
@@ -329,12 +165,9 @@ namespace DebugInterceptor.Services
 
                 using var debugImg = (Bitmap)source.Clone();
                 using var g = Graphics.FromImage(debugImg);
-
-                // 🔴 Красная рамка региона
                 using var pen = new Pen(Color.FromArgb(200, Color.Red), 3);
                 g.DrawRectangle(pen, region.X, region.Y, region.Width, region.Height);
 
-                // 📝 Подпись с координатами
                 var label = $"[{region.X},{region.Y}] {region.Width}x{region.Height}";
                 using var font = new Font("Segoe UI", 12, System.Drawing.FontStyle.Bold);
                 using var textBrush = new SolidBrush(Color.Yellow);
@@ -351,16 +184,9 @@ namespace DebugInterceptor.Services
             catch (Exception ex) { _logger.LogWarning(ex, "⚠ Ошибка сохранения отладки"); }
         }
 
-        /// <summary>
-        /// 🔹 Вырезает область из битмапа
-        /// </summary>
-        private Bitmap CropBitmap(Bitmap source, Rectangle area)
-        {
-            var cropped = new Bitmap(area.Width, area.Height);
-            using var g = Graphics.FromImage(cropped);
-            g.DrawImage(source, new Rectangle(0, 0, area.Width, area.Height), area, GraphicsUnit.Pixel);
-            return cropped;
-        }
+        #endregion
+
+        #region OCR & Processing
 
         // ═══════════════════════════════════════════════════════
         // 🔹 OCR-валидация заголовка
@@ -412,6 +238,13 @@ namespace DebugInterceptor.Services
             else ShowOcrFallback(rawText);
         }
 
+        #endregion
+
+        #region UI & Messages
+
+        // ═══════════════════════════════════════════════════════
+        // 🔹 Показ окна с результатами (середина левой стороны на курсоре)
+        // ═══════════════════════════════════════════════════════
         private async Task ShowResultsWindow(List<DebugRecord> records) =>
             await System.Windows.Application.Current.Dispatcher.InvokeAsync(() =>
             {
@@ -419,16 +252,36 @@ namespace DebugInterceptor.Services
                 var vm = _serviceProvider.GetRequiredService<DebugResultViewModel>();
                 vm.LoadRecords(records);
                 window.DataContext = vm;
-                window.Show(); window.Activate(); window.Topmost = true;
+
+                GetCursorPos(out var cursorPos);
+
+                window.Left = cursorPos.X;
+                window.Top = cursorPos.Y - (window.Height / 2);
+
+                var screenWidth = System.Windows.SystemParameters.WorkArea.Width;
+                var screenHeight = System.Windows.SystemParameters.WorkArea.Height;
+                var windowWidth = window.Width;
+                var windowHeight = window.Height;
+
+                if (cursorPos.X + windowWidth > screenWidth)
+                    window.Left = Math.Max(0, cursorPos.X - windowWidth);
+                if (window.Top < 0) window.Top = 0;
+                if (window.Top + windowHeight > screenHeight)
+                    window.Top = Math.Max(0, screenHeight - windowHeight);
+
+                window.Show();
+                window.Activate();
+                window.Topmost = true;
             });
 
         private void ShowOcrFallback(string? rawText) => System.Windows.Application.Current.Dispatcher.InvokeAsync(() =>
-            MessageBox.Show($"Распознано:\n---\n{rawText?[..Math.Min(300, rawText.Length)]}...\n---\n\nНе найдено записей вида '12345 : Таблица'.",
+            MessageBox.Show(
+                $"Распознано:\n---\n{rawText?[..Math.Min(300, rawText.Length)]}...\n---\n\nНе найдено записей вида '12345 : Таблица'.",
                 "Результат", MessageBoxButton.OK, MessageBoxImage.Information));
 
         private void ShowNoChangesWarning() => System.Windows.Application.Current.Dispatcher.InvokeAsync(() =>
-            MessageBox.Show("Не найдено изменений, похожих на тултип.\n\n" +
-                "Убедитесь, что тултип открылся после звукового сигнала.",
+            MessageBox.Show(
+                "Не найдено изменений, похожих на тултип.\n\nУбедитесь, что тултип открылся после звукового сигнала.",
                 "Нет изменений", MessageBoxButton.OK, MessageBoxImage.Warning));
 
         private void ShowError(string message) => System.Windows.Application.Current.Dispatcher.InvokeAsync(() =>
@@ -436,14 +289,17 @@ namespace DebugInterceptor.Services
 
         private static bool LooksLikeDebugWindow(string? text) =>
             !string.IsNullOrEmpty(text) && Regex.IsMatch(text, @"-?\d+\s*:\s*\w+");
-    }
 
-    // ═══════════════════════════════════════════════════════
-    // 🔹 Вспомогательный метод для Rectangle
-    // ═══════════════════════════════════════════════════════
-    public static class RectangleExtensions
-    {
-        public static bool Contains(this Rectangle r, int x, int y) =>
-            x >= r.Left && x < r.Right && y >= r.Top && y < r.Bottom;
+        #endregion
+
+        #region WinAPI
+
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        private static extern bool GetCursorPos(out POINT lpPoint);
+
+        [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+        private struct POINT { public int X; public int Y; }
+
+        #endregion
     }
 }
