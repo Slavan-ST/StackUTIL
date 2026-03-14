@@ -30,9 +30,8 @@ namespace DebugInterceptor.Services
         // ═══════════════════════════════════════════════════════
         // Настройки
         // ═══════════════════════════════════════════════════════
-        private const byte VK_F11 = 0x7A;
-        private const Keys VK_F12 = Keys.F12;  // ← используем enum Keys вместо byte
-        private const int CaptureDelayMs = 1000;
+        private const Keys VK_F12 = Keys.F12;
+        private const int CaptureDelayMs = 500;
         private const int PixelDiffThreshold = 25;
         private const int MinRegionArea = 500;
         private const int MinTooltipW = 100, MaxTooltipW = 900;
@@ -59,10 +58,9 @@ namespace DebugInterceptor.Services
             if (_hotkeyService != null) return;
             _hotkeyService = new HotkeyService(mainWindow);
 
-            // 🔹 Регистрация через хук — комбинация НЕ блокируется
             _captureHotkeyId = _hotkeyService.RegisterCombo(
                 alt: true, shift: true, ctrl: false, win: false,
-                virtualKey: VK_F12,  // Keys.F12
+                virtualKey: VK_F12,
                 callback: () => OnCaptureHotkeyPressed(_stoppingToken));
 
             _logger.LogInformation("✅ Хоткей: Shift+Alt+F12 (pass-through, авто-захват)");
@@ -91,34 +89,29 @@ namespace DebugInterceptor.Services
             {
                 _logger.LogDebug("🔔 Запуск авто-захвата...");
 
-                // 1️⃣ Базовый снимок
                 baseline = _captureService.CaptureFullScreen();
                 if (baseline == null) { ShowError("Не удалось сделать базовый скриншот"); return; }
                 _logger.LogDebug("📸 Базовый: {W}x{H}", baseline.Width, baseline.Height);
 
-                // 2️⃣ Пауза — время открыть тултип
                 _logger.LogInformation("⏳ Ожидание {Ms} мс...", CaptureDelayMs);
                 await Task.Delay(CaptureDelayMs, token);
 
-                // 3️⃣ Текущий снимок
                 current = _captureService.CaptureFullScreen();
                 if (current == null) { ShowError("Не удалось сделать текущий скриншот"); return; }
                 _logger.LogDebug("📸 Текущий: {W}x{H}", current.Width, current.Height);
 
-                // 4️⃣ Поиск изменённой области
                 var diffRect = FindChangedRegion(baseline, current);
                 if (diffRect == null) { ShowNoChangesWarning(); return; }
 
                 _logger.LogInformation("📐 Регион: {X},{Y} {W}x{H}",
                     diffRect.Value.X, diffRect.Value.Y, diffRect.Value.Width, diffRect.Value.Height);
 
+                // 🔹 Извлекаем ТОЛЬКО из current
                 result = CropBitmap(current, diffRect.Value);
 
-                // 5️⃣ Опциональная валидация заголовка (не блокирующая)
                 if (!ContainsTooltipHeader(result))
                     _logger.LogWarning("⚠ Заголовок 'Структура записи' не найден, продолжаем...");
 
-                // 6️⃣ Обработка и показ результата
                 await ProcessAndShowResult(result);
             }
             catch (OperationCanceledException) { _logger.LogDebug("⚠ Отменено"); }
@@ -127,43 +120,153 @@ namespace DebugInterceptor.Services
         }, token);
 
         // ═══════════════════════════════════════════════════════
-        // 🔹 Diff-логика
+        // 🔹 Diff-логика: baseline → только для детекции, current → только для извлечения
         // ═══════════════════════════════════════════════════════
-        private Rectangle? FindChangedRegion(Bitmap baseline, Bitmap current)
+        private Rectangle? FindChangedRegion(Bitmap baseline, Bitmap current, bool saveDebugImage = true)
         {
             if (baseline.Width != current.Width || baseline.Height != current.Height) return null;
 
-            // 🔹 Fix 1: разделяем объявление переменных (var не поддерживает множественное объявление)
+            // 1️⃣ Детекция: сравниваем, чтобы найти КООРДИНАТЫ изменений
+            var changedCoords = DetectChangedPixels(baseline, current);
+
+            _logger.LogDebug("🔍 Найдено {Count} изменённых пикселей", changedCoords.Count);
+            if (changedCoords.Count < MinRegionArea) return null;
+
+            // 2️⃣ Отладка детекции (с маркерами)
+            if (saveDebugImage)
+                SaveDetectionDebug(current, changedCoords, "detection_overlay");
+
+            // 3️⃣ Границы всех изменений
+            var globalBounds = GetBoundingRectangle(changedCoords, current.Width, current.Height);
+            if (globalBounds.IsEmpty) return null;
+
+            // 4️⃣ Поиск связанных регионов
+            var regions = FindConnectedComponents(changedCoords, current.Width, current.Height);
+            _logger.LogDebug("📦 Найдено регионов: {Count}", regions.Count);
+
+            // 5️⃣ Выбор кандидата
+            var candidate = regions.FirstOrDefault(IsValidTooltipRegion);
+            if (candidate.IsEmpty)
+                candidate = regions.FirstOrDefault(r => r.Width * r.Height >= MinRegionArea);
+
+            // 6️⃣ Финальный прямоугольник
+            Rectangle finalRect;
+            if (!candidate.IsEmpty)
+            {
+                var pad = RegionPadding;
+                int x = Math.Max(0, candidate.X - pad);
+                int y = Math.Max(0, candidate.Y - pad);
+                int right = Math.Min(current.Width, candidate.Right + pad);
+                int bottom = Math.Min(current.Height, candidate.Bottom + pad * 2);
+                finalRect = new Rectangle(x, y, right - x, bottom - y);
+            }
+            else
+            {
+                var pad = 20;
+                int x = Math.Max(0, globalBounds.X - pad);
+                int y = Math.Max(0, globalBounds.Y - pad);
+                int right = Math.Min(current.Width, globalBounds.Right + pad);
+                int bottom = Math.Min(current.Height, globalBounds.Bottom + pad);
+                finalRect = new Rectangle(x, y, right - x, bottom - y);
+            }
+
+            // 7️⃣ Сохраняем ЧИСТЫЙ кроп из current (без маркеров) — именно он идёт в OCR
+            if (saveDebugImage)
+            {
+                using var cleanCrop = CropBitmap(current, finalRect);
+                SaveCleanCrop(cleanCrop, "region_for_ocr");
+            }
+
+            return finalRect;
+        }
+
+        /// <summary>
+        /// 🔹 Только детекция: возвращает координаты изменённых пикселей
+        /// </summary>
+        private List<(int x, int y)> DetectChangedPixels(Bitmap baseline, Bitmap current)
+        {
             var changed = new List<(int x, int y)>();
+
             for (int y = 0; y < baseline.Height; y++)
             {
                 for (int x = 0; x < baseline.Width; x++)
                 {
                     var b = baseline.GetPixel(x, y);
                     var c = current.GetPixel(x, y);
-                    if (Math.Abs((b.R + b.G + b.B) - (c.R + c.G + c.B)) / 3 > PixelDiffThreshold)
+
+                    int bBrightness = (b.R + b.G + b.B) / 3;
+                    int cBrightness = (c.R + c.G + c.B) / 3;
+
+                    // Детектируем только появление нового контента (не исчезновение)
+                    if (cBrightness > 50 && Math.Abs(bBrightness - cBrightness) > PixelDiffThreshold)
                         changed.Add((x, y));
                 }
             }
+            return changed;
+        }
 
-            _logger.LogDebug("🔍 Пикселей изменено: {Count}", changed.Count);
-            if (changed.Count < MinRegionArea) return null;
+        /// <summary>
+        /// 🔹 Сохраняет отладочное изображение с маркерами детекции
+        /// </summary>
+        private void SaveDetectionDebug(Bitmap source, List<(int x, int y)> changed, string suffix)
+        {
+            try
+            {
+                var debugDir = Path.Combine(Path.GetTempPath(), "DebugInterceptor");
+                Directory.CreateDirectory(debugDir);
 
-            var regions = FindConnectedComponents(changed, baseline.Width, baseline.Height);
+                using var debugImg = (Bitmap)source.Clone();
+                using var g = Graphics.FromImage(debugImg);
+                using var pen = new Pen(Color.FromArgb(100, Color.Lime), 1);
 
-            // 🔹 Fix 2: Rectangle — struct, не может быть null, поэтому ?? не работает
-            // Вариант А: явная проверка через IsEmpty
-            var candidate = regions.FirstOrDefault(IsValidTooltipRegion);
-            if (candidate.IsEmpty)
-                candidate = regions.FirstOrDefault(r => r.Width * r.Height >= MinRegionArea);
-            if (candidate.IsEmpty)
-                return null;
+                var byRow = changed.GroupBy(p => p.y).Take(300);
+                foreach (var row in byRow)
+                {
+                    var xs = row.Select(p => p.x).OrderBy(x => x).ToArray();
+                    for (int i = 0; i < xs.Length;)
+                    {
+                        int start = xs[i], end = xs[i];
+                        while (i + 1 < xs.Length && xs[i + 1] == end + 1) { end = xs[++i]; }
+                        if (end - start > 1) g.DrawLine(pen, start, row.Key, end, row.Key);
+                        else g.DrawRectangle(pen, start, row.Key, 1, 1);
+                        i++;
+                    }
+                }
+                g.DrawRectangle(Pens.Red, 0, 0, debugImg.Width - 1, debugImg.Height - 1);
 
-            var pad = RegionPadding;
-            return new Rectangle(
-                Math.Max(0, candidate.X), Math.Max(0, candidate.Y - pad),
-                Math.Min(baseline.Width, candidate.Width + pad),
-                Math.Min(baseline.Height, candidate.Height + pad));
+                var path = Path.Combine(debugDir, $"debug_{suffix}_{DateTime.Now:yyyyMMdd_HHmmss_fff}.png");
+                debugImg.Save(path, System.Drawing.Imaging.ImageFormat.Png);
+                _logger.LogDebug("💾 Детекция: {Path}", path);
+            }
+            catch (Exception ex) { _logger.LogWarning(ex, "⚠ Ошибка сохранения детекции"); }
+        }
+
+        /// <summary>
+        /// 🔹 Сохраняет ЧИСТЫЙ кроп без маркеров — именно этот контент идёт в OCR
+        /// </summary>
+        private void SaveCleanCrop(Bitmap cleanImage, string suffix)
+        {
+            try
+            {
+                var debugDir = Path.Combine(Path.GetTempPath(), "DebugInterceptor");
+                Directory.CreateDirectory(debugDir);
+
+                var path = Path.Combine(debugDir, $"clean_{suffix}_{DateTime.Now:yyyyMMdd_HHmmss_fff}.png");
+                cleanImage.Save(path, System.Drawing.Imaging.ImageFormat.Png);
+                _logger.LogDebug("💾 Чистый регион: {Path} ({W}x{H})", path, cleanImage.Width, cleanImage.Height);
+            }
+            catch (Exception ex) { _logger.LogWarning(ex, "⚠ Ошибка сохранения чистого кропа"); }
+        }
+
+        /// <summary>
+        /// Вычисляет ограничивающий прямоугольник для списка точек
+        /// </summary>
+        private Rectangle GetBoundingRectangle(List<(int x, int y)> pixels, int maxWidth, int maxHeight)
+        {
+            if (pixels.Count == 0) return Rectangle.Empty;
+            int minX = pixels.Min(p => p.x), maxX = pixels.Max(p => p.x);
+            int minY = pixels.Min(p => p.y), maxY = pixels.Max(p => p.y);
+            return new Rectangle(minX, minY, maxX - minX + 1, maxY - minY + 1);
         }
 
         private bool IsValidTooltipRegion(Rectangle r) =>
@@ -288,5 +391,14 @@ namespace DebugInterceptor.Services
 
         private static bool LooksLikeDebugWindow(string? text) =>
             !string.IsNullOrEmpty(text) && Regex.IsMatch(text, @"-?\d+\s*:\s*\w+");
+    }
+
+    // ═══════════════════════════════════════════════════════
+    // 🔹 Вспомогательный метод для Rectangle.Contains
+    // ═══════════════════════════════════════════════════════
+    public static class RectangleExtensions
+    {
+        public static bool Contains(this Rectangle r, int x, int y) =>
+            x >= r.Left && x < r.Right && y >= r.Top && y < r.Bottom;
     }
 }
