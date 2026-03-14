@@ -6,6 +6,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using StackUTIL.Models.Enums;
 using System.IO;
 using System.Windows;
 
@@ -42,7 +43,28 @@ namespace StackUTIL
                     services.AddSingleton<OcrService>();
                     services.AddSingleton<DebugDataParser>();
                     services.AddSingleton<BitmapUtility>();
-                    services.AddSingleton<INotificationService, NotificationService>();
+
+
+                    services.AddSingleton<INotificationService>(sp =>
+                    {
+                        var settings = sp.GetRequiredService<IOptions<DebugInterceptorSettings>>().Value;
+                        var logger = sp.GetRequiredService<ILogger<INotificationService>>();
+
+                        return settings.NotificationMode switch
+                        {
+                            NotificationMode.LogOnly => new LoggingNotificationService(
+                                sp.GetRequiredService<ILogger<LoggingNotificationService>>()),
+
+                            NotificationMode.Both => new CompositeNotificationService(
+                                new NotificationService(logger),
+                                new LoggingNotificationService(
+                                    sp.GetRequiredService<ILogger<LoggingNotificationService>>())),
+
+                            NotificationMode.MessageBox => new NotificationService(logger),
+
+                            _ => new NotificationService(logger) // fallback
+                        };
+                    });
 
                     // Сервисы, зависящие от настроек (передаём IOptions<T>, не .Value!)
                     services.AddSingleton<RegionDetector>(sp =>

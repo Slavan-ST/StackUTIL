@@ -1,4 +1,5 @@
-﻿using System.IO;
+﻿using StackUTIL.Models.Enums;
+using System.IO;
 using System.Windows.Input;
 
 namespace DebugInterceptor.Models
@@ -46,5 +47,10 @@ namespace DebugInterceptor.Models
         // ═══════════════════════════════════════════════════════
         public string DebugOutputPath { get; set; } = Path.Combine(Path.GetTempPath(), "DebugInterceptor");
         public bool SaveDebugImages { get; set; } = true;
+
+        /// <summary>
+        /// 🔹 Режим вывода уведомлений пользователю
+        /// </summary>
+        public NotificationMode NotificationMode { get; set; } = NotificationMode.MessageBox;
     }
 }

@@ -10,6 +10,10 @@
 	</PropertyGroup>
 
 	<ItemGroup>
+	  <None Remove="appsettings.json" />
+	</ItemGroup>
+
+	<ItemGroup>
 		<PackageReference Include="Tesseract" Version="5.2.0" />
 		<PackageReference Include="Microsoft.Extensions.Hosting" Version="8.0.0" />
 		<PackageReference Include="Microsoft.Extensions.Logging.Console" Version="8.0.0" />
@@ -18,6 +22,9 @@
 
 	<!-- Языковой файл -->
 	<ItemGroup>
+		<Content Include="appsettings.json">
+		  <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+		</Content>
 		<Content Include="tessdata\rus.traineddata">
 			<CopyToOutputDirectory>Always</CopyToOutputDirectory>
 		</Content>

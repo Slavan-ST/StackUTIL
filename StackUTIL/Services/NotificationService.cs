@@ -6,9 +6,9 @@ namespace DebugInterceptor.Services
 {
     public class NotificationService : INotificationService
     {
-        private readonly ILogger<NotificationService> _logger;
+        private readonly ILogger<INotificationService> _logger;
 
-        public NotificationService(ILogger<NotificationService> logger)
+        public NotificationService(ILogger<INotificationService> logger)
         {
             _logger = logger;
         }

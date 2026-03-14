@@ -8,6 +8,14 @@ using System.Windows.Input;
 
 namespace DebugInterceptor.Services
 {
+    /// <summary>
+    /// 🔹 Фоновый сервис перехвата отладочных данных через скриншоты и OCR
+    /// </summary>
+    /// <remarks>
+    /// Сервис работает как <see cref="BackgroundService"/>, регистрирует глобальный хоткей,
+    /// делает два скриншота с задержкой, находит изменённые регионы, валидирует их через OCR
+    /// и показывает результат в окне <see cref="Views.DebugResultWindow"/>.
+    /// </remarks>
     public class DebugInterceptService : BackgroundService
     {
         #region Fields & Settings
@@ -40,6 +48,20 @@ namespace DebugInterceptor.Services
 
         #region Constructor & Lifecycle
 
+        /// <summary>
+        /// 🔹 Инициализирует новый экземпляр <see cref="DebugInterceptService"/>
+        /// </summary>
+        /// <param name="logger">Логгер сервиса</param>
+        /// <param name="captureService">Сервис захвата скриншотов</param>
+        /// <param name="ocrService">Сервис распознавания текста (Tesseract)</param>
+        /// <param name="parser">Парсер распознанного текста в структурированные записи</param>
+        /// <param name="regionDetector">Детектор изменённых регионов на скриншотах</param>
+        /// <param name="bitmapUtility">Утилиты для работы с Bitmap (кроп, отладка)</param>
+        /// <param name="tooltipValidator">Валидатор заголовка тултипа через OCR</param>
+        /// <param name="resultProcessor">Обработчик результата: OCR → парсинг → показ UI</param>
+        /// <param name="serviceProvider">Провайдер сервисов для разрешения зависимостей UI</param>
+        /// <param name="notifier">Сервис показа уведомлений пользователю</param>
+        /// <param name="settings">Настройки модуля из <see cref="IOptions{DebugInterceptorSettings}"/></param>
         public DebugInterceptService(
             ILogger<DebugInterceptService> logger,
             ScreenCaptureService captureService,
@@ -66,6 +88,10 @@ namespace DebugInterceptor.Services
             _settings = settings.Value;
         }
 
+        /// <summary>
+        /// 🔹 Инициализирует глобальные хоткеи для перехвата
+        /// </summary>
+        /// <param name="mainWindow">Главное окно приложения (владелец хоткеев)</param>
         public void InitializeHotkeys(Window mainWindow)
         {
             if (_hotkeyService != null) return;
@@ -83,12 +109,14 @@ namespace DebugInterceptor.Services
                 $"{(_settings.HotkeyCtrl ? "Ctrl+" : "")}{(_settings.HotkeyAlt ? "Alt+" : "")}{(_settings.HotkeyShift ? "Shift+" : "")}{_settings.CaptureHotkey}");
         }
 
+        /// <inheritdoc />
         protected override Task ExecuteAsync(CancellationToken stoppingToken)
         {
             _stoppingToken = stoppingToken;
             return Task.CompletedTask;
         }
 
+        /// <inheritdoc />
         public override async Task StopAsync(CancellationToken cancellationToken)
         {
             _hotkeyService?.Unregister(_captureHotkeyId);
@@ -98,9 +126,22 @@ namespace DebugInterceptor.Services
 
         #endregion
 
-        // ═══════════════════════════════════════════════════════
-        // 🔹 Единый обработчик: скрин1 → задержка → скрин2 → анализ
-        // ═══════════════════════════════════════════════════════
+        #region Capture Handler
+
+        /// <summary>
+        /// 🔹 Обработчик нажатия хоткея: захват → анализ → результат
+        /// </summary>
+        /// <param name="token">Токен отмены для асинхронных операций</param>
+        /// <remarks>
+        /// Алгоритм:
+        /// <list type="bullet">
+        /// <item><description>Делает базовый скриншот</description></item>
+        /// <item><description>Ждёт <see cref="DebugInterceptorSettings.CaptureDelayMs"/> мс</description></item>
+        /// <item><description>Делает текущий скриншот</description></item>
+        /// <item><description>Находит изменённые регионы через <see cref="RegionDetector"/></description></item>
+        /// <item><description>Для каждого региона: кроп → валидация заголовка → обработка результата</description></item>
+        /// </list>
+        /// </remarks>
         private void OnCaptureHotkeyPressed(CancellationToken token) => Task.Run(async () =>
         {
             Bitmap? baseline = null, current = null;
@@ -141,5 +182,7 @@ namespace DebugInterceptor.Services
             catch (Exception ex) { _logger.LogError(ex, "❌ Ошибка захвата"); _notifier.ShowError(ex.Message); }
             finally { baseline?.Dispose(); current?.Dispose(); }
         }, token);
+
+        #endregion
     }
 }
