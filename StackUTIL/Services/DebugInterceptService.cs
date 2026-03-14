@@ -1,5 +1,4 @@
-﻿// Services/DebugInterceptService.cs
-using DebugInterceptor.Models;
+﻿using DebugInterceptor.Models;
 using DebugInterceptor.ViewModels;
 using DebugInterceptor.Views;
 using Microsoft.Extensions.DependencyInjection;
@@ -42,6 +41,7 @@ namespace DebugInterceptor.Services
         private const int RegionPadding = 0;
         private const int ExpansionMargin = 10;
         private readonly RegionDetector _regionDetector;
+        private readonly BitmapUtility _bitmapUtility;  
 
         #endregion
 
@@ -53,6 +53,7 @@ namespace DebugInterceptor.Services
             OcrService ocrService,
             DebugDataParser parser,
             RegionDetector regionDetector,
+            BitmapUtility bitmapUtility,  // ← новый параметр
             IServiceProvider serviceProvider)
         {
             _logger = logger;
@@ -60,6 +61,7 @@ namespace DebugInterceptor.Services
             _ocrService = ocrService;
             _parser = parser;
             _serviceProvider = serviceProvider;
+            _bitmapUtility = bitmapUtility;  // ← инициализация
             _regionDetector = regionDetector;  
         }
 
@@ -124,8 +126,8 @@ namespace DebugInterceptor.Services
                     _logger.LogInformation("📐 Регион: {X},{Y} {W}x{H}",
                         region.X, region.Y, region.Width, region.Height);
 
-                    using var cropped = CropBitmap(current, region);
-                    SaveDebugWithRegion(current, region, "region_debug");
+                    using var cropped = _bitmapUtility.CropBitmap(current, region);
+                    _bitmapUtility.SaveDebugWithRegion(current, region, "region_debug");
 
                     if (!ContainsTooltipHeader(cropped))
                         _logger.LogWarning("⚠ Заголовок 'Структура записи' не найден, продолжаем...");
@@ -140,51 +142,6 @@ namespace DebugInterceptor.Services
 
         #endregion
 
-        #region Bitmap Helpers
-
-        /// <summary>
-        /// 🔹 Вырезает область из битмапа
-        /// </summary>
-        private Bitmap CropBitmap(Bitmap source, Rectangle area)
-        {
-            var cropped = new Bitmap(area.Width, area.Height);
-            using var g = Graphics.FromImage(cropped);
-            g.DrawImage(source, new Rectangle(0, 0, area.Width, area.Height), area, GraphicsUnit.Pixel);
-            return cropped;
-        }
-
-        /// <summary>
-        /// 🔹 Сохраняет скриншот с обводкой региона для отладки
-        /// </summary>
-        private void SaveDebugWithRegion(Bitmap source, Rectangle region, string suffix)
-        {
-            try
-            {
-                var debugDir = Path.Combine(Path.GetTempPath(), "DebugInterceptor");
-                Directory.CreateDirectory(debugDir);
-
-                using var debugImg = (Bitmap)source.Clone();
-                using var g = Graphics.FromImage(debugImg);
-                using var pen = new Pen(Color.FromArgb(200, Color.Red), 3);
-                g.DrawRectangle(pen, region.X, region.Y, region.Width, region.Height);
-
-                var label = $"[{region.X},{region.Y}] {region.Width}x{region.Height}";
-                using var font = new Font("Segoe UI", 12, System.Drawing.FontStyle.Bold);
-                using var textBrush = new SolidBrush(Color.Yellow);
-                using var bgBrush = new SolidBrush(Color.FromArgb(180, Color.Black));
-
-                var textSize = g.MeasureString(label, font);
-                g.FillRectangle(bgBrush, region.X, region.Y - 25, textSize.Width + 8, 22);
-                g.DrawString(label, font, textBrush, region.X + 4, region.Y - 23);
-
-                var path = Path.Combine(debugDir, $"debug_{suffix}_{DateTime.Now:yyyyMMdd_HHmmss_fff}.png");
-                debugImg.Save(path, System.Drawing.Imaging.ImageFormat.Png);
-                _logger.LogDebug("💾 Отладка региона: {Path}", path);
-            }
-            catch (Exception ex) { _logger.LogWarning(ex, "⚠ Ошибка сохранения отладки"); }
-        }
-
-        #endregion
 
         #region OCR & Processing
 

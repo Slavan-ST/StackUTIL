@@ -33,6 +33,7 @@ namespace StackUTIL
                     services.AddSingleton<OcrService>();
                     services.AddSingleton<DebugDataParser>();
                     services.AddSingleton<RegionDetector>();
+                    services.AddSingleton<BitmapUtility>();
 
                     // ==========================================
                     // 🔥 DebugInterceptService
