@@ -68,7 +68,7 @@ namespace DebugInterceptor.Services
         }
 
         /// <summary>
-        /// Очищает название таблицы от "мусора" OCR — БЕЗ агрессивных замен
+        /// Очищает название таблицы от "мусора" OCR
         /// </summary>
         private string CleanTableName(string rawName)
         {

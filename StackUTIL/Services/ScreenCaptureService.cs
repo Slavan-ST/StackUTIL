@@ -1,5 +1,4 @@
-﻿// Services/ScreenCaptureService.cs
-using System.Drawing;
+﻿using System.Drawing;
 using System.Drawing.Imaging;
 using System.Runtime.InteropServices;
 
@@ -43,8 +42,8 @@ namespace DebugInterceptor.Services
         /// </summary>
         public Bitmap CaptureFullScreen()
         {
-            var screen = System.Windows.Forms.Screen.PrimaryScreen;
-            var bounds = screen.Bounds;
+            var screen = Screen.PrimaryScreen;
+            var bounds = screen!.Bounds;
 
             IntPtr hdcScreen = GetWindowDC(GetDesktopWindow());
             IntPtr hdcMem = CreateCompatibleDC(hdcScreen);
@@ -63,33 +62,6 @@ namespace DebugInterceptor.Services
 
                 var bitmap = Image.FromHbitmap(hBitmap);
                 return bitmap;
-            }
-            finally
-            {
-                SelectObject(hdcMem, hOld);
-                DeleteObject(hBitmap);
-                DeleteDC(hdcMem);
-                ReleaseDC(GetDesktopWindow(), hdcScreen);
-            }
-        }
-
-        /// <summary>
-        /// Альтернатива: захват конкретной области (для тестов)
-        /// </summary>
-        public Bitmap CaptureRegion(Rectangle area)
-        {
-            IntPtr hdcScreen = GetWindowDC(GetDesktopWindow());
-            IntPtr hdcMem = CreateCompatibleDC(hdcScreen);
-            IntPtr hBitmap = CreateCompatibleBitmap(hdcScreen, area.Width, area.Height);
-            IntPtr hOld = SelectObject(hdcMem, hBitmap);
-
-            try
-            {
-                BitBlt(hdcMem, 0, 0, area.Width, area.Height,
-                    hdcScreen, area.X, area.Y,
-                    CopyPixelOperation.SourceCopy | CopyPixelOperation.CaptureBlt);
-
-                return Image.FromHbitmap(hBitmap);
             }
             finally
             {

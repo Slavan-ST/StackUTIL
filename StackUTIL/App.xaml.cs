@@ -2,8 +2,7 @@
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
-using StackUTIL.Services; // ← namespace с расширениями
-using System.IO;
+using StackUTIL.Services;
 using System.Windows;
 
 namespace StackUTIL
@@ -25,31 +24,23 @@ namespace StackUTIL
                 })
                 .ConfigureServices((context, services) =>
                 {
-                    // ✅ Вся регистрация — в одном методе
                     services.AddDebugInterceptorServices(context.Configuration);
-
-                    // 📡 TrayService (фоновый сервис)
                     services.AddSingleton<TrayService>();
                     services.AddHostedService(sp => sp.GetRequiredService<TrayService>());
                 })
                 .Build();
 
             _logger = _host.Services.GetRequiredService<ILogger<App>>();
-            _logger.LogDebug("🔧 App.ctor: хост построен");
         }
 
         protected override async void OnStartup(StartupEventArgs e)
         {
-            _logger.LogInformation("🚀 App.OnStartup: начало");
-
             try
             {
                 await _host.StartAsync();
-                _logger.LogInformation("✅ Хост запущен");
             }
             catch (Exception ex)
             {
-                _logger.LogCritical(ex, "❌ Ошибка запуска хоста");
                 System.Windows.MessageBox.Show($"Не удалось запустить приложение:\n{ex.Message}",
                     "Ошибка", MessageBoxButton.OK, MessageBoxImage.Error);
                 Shutdown(1);
@@ -82,7 +73,6 @@ namespace StackUTIL
 
         protected override async void OnExit(ExitEventArgs e)
         {
-            _logger.LogInformation("🛑 App.OnExit: завершение");
             try { await _host.StopAsync(); }
             catch (Exception ex) { _logger.LogWarning(ex, "⚠ Ошибка остановки"); }
             finally { _host?.Dispose(); }

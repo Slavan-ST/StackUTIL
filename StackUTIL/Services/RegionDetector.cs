@@ -8,17 +8,51 @@ namespace DebugInterceptor.Services
     /// <summary>
     /// 🔹 Детектор изменённых регионов на скриншотах
     /// </summary>
+    /// <remarks>
+    /// Класс реализует алгоритм поиска областей, изменившихся между двумя скриншотами:
+    /// <list type="number">
+    /// <item><description>Попиксельное сравнение с порогом яркости</description></item>
+    /// <item><description>Поиск связанных компонентов (4-связность)</description></item>
+    /// <item><description>Фильтрация по размеру и габаритам</description></item>
+    /// <item><description>Расширение границ до контента</description></item>
+    /// </list>
+    /// Используется в модуле перехвата отладочных тултипов.
+    /// </remarks>
     public class RegionDetector
     {
         private readonly ILogger<RegionDetector> _logger;
         private readonly DebugInterceptorSettings _settings;
 
+        /// <summary>
+        /// 🔹 Инициализирует новый экземпляр <see cref="RegionDetector"/>
+        /// </summary>
+        /// <param name="logger">Экземпляр логгера для диагностики</param>
+        /// <param name="settings">Настройки детектора из <see cref="IOptions{DebugInterceptorSettings}"/></param>
         public RegionDetector(ILogger<RegionDetector> logger, IOptions<DebugInterceptorSettings> settings)
         {
             _logger = logger;
             _settings = settings.Value;
         }
 
+        /// <summary>
+        /// 🔹 Находит изменённые регионы между двумя скриншотами
+        /// </summary>
+        /// <param name="baseline">Базовый скриншот (состояние "до")</param>
+        /// <param name="current">Текущий скриншот (состояние "после")</param>
+        /// <returns>
+        /// Список прямоугольников <see cref="Rectangle"/>, описывающих изменённые области.
+        /// Пустой список, если изменения не найдены или не прошли фильтрацию.
+        /// </returns>
+        /// <remarks>
+        /// Алгоритм:
+        /// <list type="bullet">
+        /// <item><description>Проверка размеров изображений</description></item>
+        /// <item><description>Детекция изменённых пикселей (<see cref="DetectChangedPixels"/>)</description></item>
+        /// <item><description>Поиск связанных компонентов (<see cref="FindConnectedComponents"/>)</description></item>
+        /// <item><description>Фильтрация по минимальной площади и габаритам тултипа</description></item>
+        /// <item><description>Расширение границ до реального контента (<see cref="ExpandRegionToContent"/>)</description></item>
+        /// </list>
+        /// </remarks>
         public List<Rectangle> FindChangedRegions(Bitmap baseline, Bitmap current)
         {
             if (baseline.Width != current.Width || baseline.Height != current.Height)
@@ -63,6 +97,18 @@ namespace DebugInterceptor.Services
             return expandedRegions;
         }
 
+        /// <summary>
+        /// 🔹 Расширяет регион до границ визуального контента
+        /// </summary>
+        /// <param name="initial">Начальный прямоугольник региона</param>
+        /// <param name="current">Текущий скриншот</param>
+        /// <param name="baseline">Базовый скриншот для сравнения</param>
+        /// <returns>Расширенный <see cref="Rectangle"/>, включающий весь видимый контент</returns>
+        /// <remarks>
+        /// Метод пошагово расширяет границы региона влево/вправо/вверх/вниз,
+        /// пока в добавляемой полосе есть значимые изменения (см. <see cref="HasSignificantChanges"/>).
+        /// Позволяет захватить весь тултип, даже если изначально детектирована только его часть.
+        /// </remarks>
         private Rectangle ExpandRegionToContent(Rectangle initial, Bitmap current, Bitmap baseline)
         {
             int left = initial.Left, top = initial.Top;
@@ -76,6 +122,19 @@ namespace DebugInterceptor.Services
             return Rectangle.FromLTRB(left, top, right, bottom);
         }
 
+        /// <summary>
+        /// 🔹 Проверяет наличие значимых изменений в указанной полосе пикселей
+        /// </summary>
+        /// <param name="current">Текущий скриншот</param>
+        /// <param name="baseline">Базовый скриншот</param>
+        /// <param name="x1">Левая граница полосы (включительно)</param>
+        /// <param name="y1">Верхняя граница полосы (включительно)</param>
+        /// <param name="x2">Правая граница полосы (исключительно)</param>
+        /// <param name="y2">Нижняя граница полосы (исключительно)</param>
+        /// <returns>
+        /// <c>true</c>, если более 20% пикселей в полосе имеют разницу яркости 
+        /// выше <see cref="DebugInterceptorSettings.PixelDiffThreshold"/>; иначе <c>false</c>.
+        /// </returns>
         private bool HasSignificantChanges(Bitmap current, Bitmap baseline, int x1, int y1, int x2, int y2)
         {
             int changedPixels = 0, totalPixels = 0;
@@ -96,6 +155,19 @@ namespace DebugInterceptor.Services
             return totalPixels > 0 && (double)changedPixels / totalPixels > 0.2;
         }
 
+        /// <summary>
+        /// 🔹 Детектирует пиксели, изменившиеся между двумя скриншотами
+        /// </summary>
+        /// <param name="baseline">Базовый скриншот</param>
+        /// <param name="current">Текущий скриншот</param>
+        /// <returns>
+        /// Список кортежей <c>(x, y)</c> с координатами изменённых пикселей.
+        /// Пиксель считается изменённым, если:
+        /// <list type="bullet">
+        /// <item><description>Его яркость в <paramref name="current"/> &gt; 50</description></item>
+        /// <item><description>Разница яркости с <paramref name="baseline"/> &gt; <see cref="DebugInterceptorSettings.PixelDiffThreshold"/></description></item>
+        /// </list>
+        /// </returns>
         private List<(int x, int y)> DetectChangedPixels(Bitmap baseline, Bitmap current)
         {
             var changed = new List<(int x, int y)>();
@@ -115,6 +187,20 @@ namespace DebugInterceptor.Services
             return changed;
         }
 
+        /// <summary>
+        /// 🔹 Находит связанные компоненты среди изменённых пикселей (алгоритм заливки)
+        /// </summary>
+        /// <param name="pixels">Список координат изменённых пикселей</param>
+        /// <param name="width">Ширина изображения</param>
+        /// <param name="height">Высота изображения</param>
+        /// <returns>
+        /// Список ограничивающих прямоугольников <see cref="Rectangle"/> для каждого компонента,
+        /// содержащего не менее <see cref="DebugInterceptorSettings.ConnectedComponentMinSize"/> пикселей.
+        /// </returns>
+        /// <remarks>
+        /// Используется поиск в ширину (BFS) с 4-связностью (верх/низ/лево/право).
+        /// Для каждого компонента вычисляется минимальный ограничивающий прямоугольник (bounding box).
+        /// </remarks>
         private List<Rectangle> FindConnectedComponents(List<(int x, int y)> pixels, int width, int height)
         {
             var visited = new HashSet<(int, int)>();

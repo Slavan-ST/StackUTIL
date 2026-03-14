@@ -2,13 +2,27 @@
 using Microsoft.Extensions.Logging;
 using StackUTIL;
 using System.Windows;
+using System.Windows.Forms;
 using Application = System.Windows.Application;
 
 namespace DebugInterceptor.Services
 {
     /// <summary>
-    /// Сервис для управления иконкой в системном трее.
+    /// 🔹 Сервис управления иконкой в системном трее (NotifyIcon)
     /// </summary>
+    /// <remarks>
+    /// Реализует <see cref="IHostedService"/> для интеграции с хостингом .NET 
+    /// и <see cref="IDisposable"/> для корректной очистки ресурсов.
+    /// <para>
+    /// Основные возможности:
+    /// <list type="bullet">
+    /// <item><description>Создание/удаление иконки в трее при старте/остановке</description></item>
+    /// <item><description>Обработка двойного клика для показа/скрытия главного окна</description></item>
+    /// <item><description>Контекстное меню с пунктом выхода из приложения</description></item>
+    /// <item><description>Потокобезопасная работа с UI через Dispatcher</description></item>
+    /// </list>
+    /// </para>
+    /// </remarks>
     public class TrayService : IHostedService, IDisposable
     {
         private readonly ILogger<TrayService> _logger;
@@ -17,6 +31,10 @@ namespace DebugInterceptor.Services
         private bool _isDisposed;
         private readonly object _lock = new();
 
+        /// <summary>
+        /// 🔹 Инициализирует новый экземпляр <see cref="TrayService"/>
+        /// </summary>
+        /// <param name="logger">Экземпляр логгера для диагностики</param>
         public TrayService(ILogger<TrayService> logger)
         {
             _logger = logger;
@@ -24,8 +42,13 @@ namespace DebugInterceptor.Services
         }
 
         /// <summary>
-        /// Устанавливает ссылку на главное окно.
+        /// 🔹 Устанавливает ссылку на главное окно приложения
         /// </summary>
+        /// <param name="window">Экземпляр <see cref="MainWindow"/> для управления</param>
+        /// <remarks>
+        /// Метод потокобезопасен (использует <c>lock</c>).
+        /// Вызывается из <see cref="App.OnStartup"/> после создания окна.
+        /// </remarks>
         public void SetMainWindow(MainWindow window)
         {
             if (window == null)
@@ -41,6 +64,16 @@ namespace DebugInterceptor.Services
             }
         }
 
+        /// <inheritdoc />
+        /// <summary>
+        /// 🔹 Запускает сервис: создаёт иконку в трее
+        /// </summary>
+        /// <param name="cancellationToken">Токен отмены (не используется, т.к. запуск синхронный)</param>
+        /// <returns>Завершённая задача <see cref="Task"/></returns>
+        /// <remarks>
+        /// Если <see cref="Application.Current"/> ещё не инициализирован, 
+        /// подписывается на событие <see cref="Application.Startup"/> для отложенного создания иконки.
+        /// </remarks>
         public Task StartAsync(CancellationToken cancellationToken)
         {
             if (cancellationToken.IsCancellationRequested)
@@ -61,19 +94,31 @@ namespace DebugInterceptor.Services
             {
                 _logger.LogWarning("⚠️ Application.Current = null, откладываем создание иконки");
                 // Подписываемся на инициализацию приложения
-                System.Windows.Application.Current.Startup += OnApplicationStartup;
+                Application.Current!.Startup += OnApplicationStartup;
             }
 
             return Task.CompletedTask;
         }
 
+        /// <summary>
+        /// 🔹 Обработчик события <see cref="Application.Startup"/> для отложенной инициализации
+        /// </summary>
+        /// <param name="sender">Источник события</param>
+        /// <param name="e">Аргументы события</param>
         private void OnApplicationStartup(object? sender, StartupEventArgs e)
         {
-            System.Windows.Application.Current.Startup -= OnApplicationStartup;
+            Application.Current.Startup -= OnApplicationStartup;
             _logger.LogDebug("🔄 Application.Startup сработал, создаём иконку...");
             CreateNotifyIcon();
         }
 
+        /// <summary>
+        /// 🔹 Создаёт и настраивает <see cref="NotifyIcon"/> в системном трее
+        /// </summary>
+        /// <remarks>
+        /// Использует иконку исполняемого файла или запасную <see cref="SystemIcons.Application"/>.
+        /// Подписывается на события мыши и создаёт контекстное меню.
+        /// </remarks>
         private void CreateNotifyIcon()
         {
             try
@@ -101,6 +146,15 @@ namespace DebugInterceptor.Services
             }
         }
 
+        /// <summary>
+        /// 🔹 Обработчик двойного клика по иконке в трее
+        /// </summary>
+        /// <param name="sender">Источник события</param>
+        /// <param name="e">Аргументы события мыши</param>
+        /// <remarks>
+        /// Реагирует только на левую кнопку мыши (<see cref="MouseButtons.Left"/>).
+        /// Вызывает <see cref="ToggleMainWindow"/> для показа/скрытия окна.
+        /// </remarks>
         private void OnNotifyIconMouseDoubleClick(object? sender, MouseEventArgs e)
         {
             if (e.Button == MouseButtons.Left)
@@ -110,6 +164,12 @@ namespace DebugInterceptor.Services
             }
         }
 
+        /// <inheritdoc />
+        /// <summary>
+        /// 🔹 Останавливает сервис: удаляет иконку из трея
+        /// </summary>
+        /// <param name="cancellationToken">Токен отмены</param>
+        /// <returns>Завершённая задача <see cref="Task"/></returns>
         public Task StopAsync(CancellationToken cancellationToken)
         {
             _logger.LogDebug("🛑 TrayService.StopAsync: остановка...");
@@ -117,6 +177,13 @@ namespace DebugInterceptor.Services
             return Task.CompletedTask;
         }
 
+        /// <summary>
+        /// 🔹 Показывает главное окно (активирует и переводит в нормальное состояние)
+        /// </summary>
+        /// <remarks>
+        /// Выполняется в потоке UI через <see cref="Dispatcher.Invoke"/>.
+        /// Если диспетчер недоступен — пытается показать окно напрямую (fallback).
+        /// </remarks>
         public void ShowMainWindow()
         {
             var window = GetMainWindow();
@@ -154,6 +221,9 @@ namespace DebugInterceptor.Services
             }
         }
 
+        /// <summary>
+        /// 🔹 Скрывает главное окно
+        /// </summary>
         public void HideMainWindow()
         {
             var window = GetMainWindow();
@@ -162,6 +232,13 @@ namespace DebugInterceptor.Services
             Application.Current?.Dispatcher.Invoke(() => window.Hide());
         }
 
+        /// <summary>
+        /// 🔹 Переключает видимость главного окна (показать ↔ скрыть)
+        /// </summary>
+        /// <remarks>
+        /// Проверяет текущее состояние <see cref="Window.IsVisible"/> в потоке UI,
+        /// затем вызывает <see cref="ShowMainWindow"/> или <see cref="HideMainWindow"/>.
+        /// </remarks>
         public void ToggleMainWindow()
         {
             var window = GetMainWindow();
@@ -180,6 +257,11 @@ namespace DebugInterceptor.Services
             else ShowMainWindow();
         }
 
+        /// <summary>
+        /// 🔹 Безопасно получает ссылку на главное окно
+        /// </summary>
+        /// <returns>Экземпляр <see cref="MainWindow"/> или <c>null</c></returns>
+        /// <remarks>Использует <c>lock</c> для потокобезопасного чтения поля <c>_mainWindow</c>.</remarks>
         private MainWindow? GetMainWindow()
         {
             lock (_lock)
@@ -190,17 +272,20 @@ namespace DebugInterceptor.Services
             }
         }
 
+        /// <summary>
+        /// 🔹 Создаёт контекстное меню для иконки в трее
+        /// </summary>
+        /// <returns>Настроенный экземпляр <see cref="ContextMenuStrip"/></returns>
+        /// <remarks>
+        /// Содержит:
+        /// <list type="bullet">
+        /// <item><description>Разделитель</description></item>
+        /// <item><description>Пункт "Выход" — завершает приложение через <see cref="Application.Shutdown"/> или <see cref="Environment.Exit"/></description></item>
+        /// </list>
+        /// </remarks>
         private ContextMenuStrip CreateContextMenu()
         {
             var menu = new ContextMenuStrip();
-
-            // Пока не нужны, м.б. потом добавлю
-            //var toggleItem = new ToolStripMenuItem("Показать окно");
-            //toggleItem.Click += (s, e) => ToggleMainWindow();
-            //menu.Items.Add(toggleItem);
-
-            //var settingsItem = new ToolStripMenuItem("Настройки...") { Enabled = false };
-            //menu.Items.Add(settingsItem);
 
             menu.Items.Add(new ToolStripSeparator());
 
@@ -223,6 +308,19 @@ namespace DebugInterceptor.Services
             return menu;
         }
 
+        /// <inheritdoc />
+        /// <summary>
+        /// 🔹 Освобождает неуправляемые ресурсы (иконка, подписки)
+        /// </summary>
+        /// <remarks>
+        /// Реализует паттерн Dispose:
+        /// <list type="number">
+        /// <item><description>Проверяет флаг <c>_isDisposed</c> для идемпотентности</description></item>
+        /// <item><description>Отписывается от событий <see cref="NotifyIcon.MouseDoubleClick"/></description></item>
+        /// <item><description>Скрывает и удаляет <see cref="NotifyIcon"/></description></item>
+        /// <item><description>Вызывает <see cref="GC.SuppressFinalize"/> для предотвращения финализации</description></item>
+        /// </list>
+        /// </remarks>
         public void Dispose()
         {
             if (_isDisposed) return;
