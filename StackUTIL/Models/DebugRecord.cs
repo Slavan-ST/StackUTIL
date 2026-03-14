@@ -1,5 +1,4 @@
-﻿// Models/DebugRecord.cs
-namespace DebugInterceptor.Models
+﻿namespace DebugInterceptor.Models
 {
     public class DebugRecord
     {

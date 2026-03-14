@@ -20,22 +20,17 @@ namespace DebugInterceptor.ViewModels
         [ObservableProperty]
         private string _statusMessage = string.Empty;
 
-        private readonly ISqlMonitoringService? _sqlService;
         private readonly SettingsManager<AppSettings>? _settingsManager;
 
         public IRelayCommand CopySelectedQueryCommand { get; }
-        public IRelayCommand ExecuteSelectedQueryCommand { get; }
         public IRelayCommand CloseCommand { get; }
 
         public DebugResultViewModel(
-            ISqlMonitoringService? sqlService = null,
             SettingsManager<AppSettings>? settingsManager = null)
         {
-            _sqlService = sqlService;
             _settingsManager = settingsManager;
 
             CopySelectedQueryCommand = new RelayCommand(CopySelectedQuery, () => SelectedRecord != null);
-            ExecuteSelectedQueryCommand = new RelayCommand(ExecuteSelectedQuery, () => SelectedRecord != null && _sqlService != null);
             CloseCommand = new RelayCommand(() =>
                 System.Windows.Application.Current.Windows
                     .OfType<DebugResultWindow>()
@@ -60,36 +55,6 @@ namespace DebugInterceptor.ViewModels
             {
                 System.Windows.Clipboard.SetText(query);
                 StatusMessage = "✅ Запрос скопирован в буфер обмена";
-            }
-        }
-
-        private async void ExecuteSelectedQuery()
-        {
-            if (SelectedRecord == null || _sqlService == null) return;
-
-            try
-            {
-                StatusMessage = "⏳ Выполнение запроса...";
-
-                // ИСПРАВЛЕНО: используем ExecuteQueryByTargetAsync
-                var targetName = _settingsManager?.Settings.DefaultTargetName ??
-                                 _settingsManager?.Settings.GetDefaultTarget()?.Name ??
-                                 "Local";
-
-                var result = await _sqlService.ExecuteQueryByTargetAsync(
-                    targetName,
-                    SelectedRecord.GeneratedQuery);
-
-                if (result.IsSuccess)
-                    StatusMessage = $"✅ Выполнено за {result.ExecutionTimeMs} мс, строк: {result.Rows?.Rows.Count ?? 0}";
-                else
-                    StatusMessage = $"❌ Ошибка: {result.ErrorMessage}";
-            }
-            catch (Exception ex)
-            {
-                StatusMessage = $"❌ Ошибка: {ex.Message}";
-                System.Windows.MessageBox.Show($"Ошибка выполнения запроса:\n{ex.Message}",
-                    "Ошибка", MessageBoxButton.OK, MessageBoxImage.Error);
             }
         }
     }

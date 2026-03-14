@@ -1,8 +1,5 @@
-﻿// Services/OcrService.cs
-using Tesseract;
+﻿using Tesseract;
 using Microsoft.Extensions.Logging;
-using System.Drawing;
-using System.Drawing.Imaging;
 using System.IO;
 
 namespace DebugInterceptor.Services

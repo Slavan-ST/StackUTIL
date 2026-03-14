@@ -1,5 +1,4 @@
-﻿<!-- Views/DebugResultWindow.xaml -->
-<Window x:Class="DebugInterceptor.Views.DebugResultWindow"
+﻿<Window x:Class="DebugInterceptor.Views.DebugResultWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="🔍 Отладочные записи" 
@@ -50,11 +49,6 @@
                     Command="{Binding CopySelectedQueryCommand}"
                     Margin="0,0,8,0" Width="130"
                     ToolTip="Копировать запрос выбранной записи в буфер обмена"/>
-
-            <Button Content="▶ Выполнить в БД" 
-                    Command="{Binding ExecuteSelectedQueryCommand}"
-                    Margin="0,0,8,0" Width="130"
-                    ToolTip="Выполнить запрос через ISqlMonitoringService"/>
 
             <Button Content="🔄 Обновить" 
                     Margin="0,0,8,0" Width="100"

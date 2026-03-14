@@ -5,21 +5,22 @@ using DebugInterceptor.Views;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
-using Microsoft.Extensions.Hosting.Internal;
 using System.Windows;
-using System.Diagnostics;
 using DebugInterceptor.Models;
+using System;
+using System.Linq;
+using System.Collections.Generic;
 
 namespace StackUTIL
 {
     public partial class App : System.Windows.Application
     {
         private IHost _host;
+        private ILogger<App> _logger;
+        private MainWindow? _mainWindow; // 👈 Храним ссылку на главное окно
 
         public App()
         {
-            Debug.WriteLine("🔧 App.ctor начался");
-
             _host = Host.CreateDefaultBuilder()
                 .ConfigureLogging(logging =>
                 {
@@ -29,145 +30,107 @@ namespace StackUTIL
                 })
                 .ConfigureServices((context, services) =>
                 {
-                    Debug.WriteLine("🔧 Регистрация сервисов...");
-
-                    // ❌ HotkeyService НЕ регистрируем в DI — создаётся вручную с окном
-
-                    // Основные сервисы
+                    // ==========================================
+                    // 📦 Основные сервисы (Singleton)
+                    // ==========================================
                     services.AddSingleton<ScreenCaptureService>();
                     services.AddSingleton<OcrService>();
                     services.AddSingleton<DebugDataParser>();
 
-                    // 🔥 ВАЖНО: регистрируем DebugInterceptService ДВУМЯ способами:
-                    // 1. Как обычный сервис — чтобы можно было получить по типу
+                    // ==========================================
+                    // 🔥 DebugInterceptService
+                    // ==========================================
                     services.AddSingleton<DebugInterceptService>();
-                    // 2. Как фоновый сервис — чтобы запустился автоматически
-                    services.AddHostedService<DebugInterceptService>();
 
-                    // Окна и ViewModel (создаются новые экземпляры при запросе)
-                    services.AddTransient<DebugResultWindow>();
-                    services.AddTransient<DebugResultViewModel>();// В App.xaml.cs, внутри ConfigureServices:
-                    services.AddSingleton<ISqlMonitoringService, SqlMonitoringService>(); // 👈 Ваш реализация
-
-                    // Остальные сервисы перехвата:
-                    services.AddSingleton<ScreenCaptureService>();
-                    services.AddSingleton<OcrService>();
-                    services.AddSingleton<DebugDataParser>();
-                    services.AddSingleton<DebugInterceptService>();
-                    services.AddHostedService<DebugInterceptService>();
-
+                    // ==========================================
+                    // 🪟 UI: Окна и ViewModel (Transient)
+                    // ==========================================
                     services.AddTransient<DebugResultWindow>();
                     services.AddTransient<DebugResultViewModel>();
-                    // В ConfigureServices:
+
+                    // 👇 Регистрация фабрики MainWindow для TrayService
+                    services.AddTransient<MainWindow>();
+                    services.AddTransient<Func<MainWindow>>(sp =>
+                        () => sp.GetRequiredService<MainWindow>());
+
+                    // ==========================================
+                    // 📡 TrayService (фоновый сервис)
+                    // ==========================================
+                    services.AddHostedService<TrayService>();
+
+                    // ==========================================
+                    // ⚙️ Настройки: SettingsManager<T>
+                    // ==========================================
                     services.AddSingleton<SettingsManager<AppSettings>>(sp =>
-                        new SettingsManager<AppSettings>("appsettings.json",
+                        new SettingsManager<AppSettings>(
+                            "appsettings.json",
                             sp.GetRequiredService<ILogger<SettingsManager<AppSettings>>>()));
-
-                    services.AddSingleton<ISqlMonitoringService, SqlMonitoringService>();
-
-                    // Остальные сервисы:
-                    services.AddSingleton<ScreenCaptureService>();
-                    services.AddSingleton<OcrService>();
-                    services.AddSingleton<DebugDataParser>();
-                    services.AddSingleton<DebugInterceptService>();
-                    services.AddHostedService<DebugInterceptService>();
-
-                    services.AddTransient<DebugResultWindow>();
-                    services.AddTransient<DebugResultViewModel>();
-
-                    Debug.WriteLine("✅ Регистрация сервисов завершена");
                 })
                 .Build();
 
-            Debug.WriteLine("✅ App.ctor завершён");
+            _logger = _host.Services.GetRequiredService<ILogger<App>>();
+            _logger.LogDebug("🔧 App.ctor: хост построен");
         }
 
         protected override async void OnStartup(StartupEventArgs e)
         {
-            Debug.WriteLine("🚀 App.OnStartup начался");
+            _logger.LogInformation("🚀 App.OnStartup: начало запуска");
 
-            // 1. Запуск хоста с обработкой ошибок
             try
             {
                 await _host.StartAsync();
-                Debug.WriteLine("✅ Хост запущен успешно");
+                _logger.LogInformation("✅ Хост запущен");
             }
             catch (Exception ex)
             {
-                Debug.WriteLine($"❌ КРИТИЧЕСКАЯ ОШИБКА запуска хоста: {ex.Message}");
-                Debug.WriteLine(ex.StackTrace);
+                _logger.LogCritical(ex, "❌ Ошибка запуска хоста");
                 System.Windows.MessageBox.Show($"Не удалось запустить приложение:\n{ex.Message}",
                     "Ошибка", MessageBoxButton.OK, MessageBoxImage.Error);
                 Shutdown(1);
                 return;
             }
 
-            // 2. Проверка ключевых сервисов
-            try
-            {
-                var ocr = _host.Services.GetService<OcrService>();
-                Debug.WriteLine($"🔍 OcrService: {(ocr != null ? "OK" : "NULL")}");
+            // 👇 Создаём и показываем главное окно (как раньше)
+            _mainWindow = new MainWindow();
+            _logger.LogTrace("🪟 MainWindow создан");
 
-                var parser = _host.Services.GetService<DebugDataParser>();
-                Debug.WriteLine($"📝 DebugDataParser: {(parser != null ? "OK" : "NULL")}");
-            }
-            catch (Exception ex)
+            // Инициализация горячих клавиш после появления хэндла
+            _mainWindow.Loaded += (s, args) =>
             {
-                Debug.WriteLine($"❌ Ошибка при проверке сервисов: {ex.Message}");
-            }
+                _logger.LogTrace("🪟 MainWindow.Loaded: инициализация хоткеев");
+                InitializeHotkeysSafely(_mainWindow);
 
-            // 3. Создание и показ главного окна
-            var mainWindow = new MainWindow();
-
-            // 👇 Инициализируем горячие клавиши ТОЛЬКО после того, как окно создало хэндл
-            mainWindow.Loaded += (s, args) =>
-            {
-                Debug.WriteLine("🪟 MainWindow.Loaded сработал");
-                InitializeHotkeysSafely(mainWindow);
+                // 👇 После инициализации передаём окно в TrayService для управления
+                var trayService = _host.Services.GetService<TrayService>();
+                trayService?.SetMainWindow(_mainWindow);
             };
 
-            mainWindow.Show();
-            Debug.WriteLine("🪟 MainWindow.Show() вызван");
-
+            _mainWindow.Show();
+            _logger.LogInformation("🪟 MainWindow показан");
             base.OnStartup(e);
-            Debug.WriteLine("✅ App.OnStartup завершён");
         }
 
         /// <summary>
-        /// Безопасная инициализация горячих клавиш с подробным логированием
+        /// Безопасная инициализация горячих клавиш
         /// </summary>
         private void InitializeHotkeysSafely(Window mainWindow)
         {
             try
             {
-                Debug.WriteLine("🔑 Начало инициализации горячих клавиш...");
-
-                // Получаем сервис перехвата
                 var interceptService = _host.Services.GetService<DebugInterceptService>();
 
                 if (interceptService == null)
                 {
-                    Debug.WriteLine("❌ interceptService = NULL");
-
-                    // Диагностика: какие сервисы вообще есть?
-                    var hosted = _host.Services.GetServices<IHostedService>().ToList();
-                    Debug.WriteLine($"📋 Найдено IHostedService: {hosted.Count}");
-                    foreach (var h in hosted)
-                        Debug.WriteLine($"   - {h.GetType().Name}");
-
+                    _logger.LogWarning("⚠️ interceptService не найден");
                     return;
                 }
 
-                Debug.WriteLine("✅ interceptService найден");
-
-                // Вызываем инициализацию
                 interceptService.InitializeHotkeys(mainWindow);
-                Debug.WriteLine("🎉 Горячие клавиши инициализированы успешно");
+                _logger.LogInformation("🎉 Горячие клавиши инициализированы");
             }
             catch (Exception ex)
             {
-                Debug.WriteLine($"❌ Ошибка инициализации горячих клавиш: {ex.Message}");
-                Debug.WriteLine(ex.StackTrace);
+                _logger.LogError(ex, "❌ Ошибка инициализации хоткеев");
                 System.Windows.MessageBox.Show($"Ошибка инициализации:\n{ex.Message}",
                     "Ошибка", MessageBoxButton.OK, MessageBoxImage.Warning);
             }
@@ -175,21 +138,21 @@ namespace StackUTIL
 
         protected override async void OnExit(ExitEventArgs e)
         {
-            Debug.WriteLine("🛑 App.OnExit начался");
+            _logger.LogInformation("🛑 App.OnExit: завершение работы");
 
             try
             {
                 await _host.StopAsync();
-                Debug.WriteLine("✅ Хост остановлен");
+                _logger.LogInformation("✅ Хост остановлен");
             }
             catch (Exception ex)
             {
-                Debug.WriteLine($"⚠ Ошибка остановки хоста: {ex.Message}");
+                _logger.LogWarning(ex, "⚠ Ошибка остановки хоста");
             }
             finally
             {
                 _host?.Dispose();
-                Debug.WriteLine("✅ App.OnExit завершён");
+                _logger.LogDebug("✅ Ресурсы освобождены");
             }
 
             base.OnExit(e);

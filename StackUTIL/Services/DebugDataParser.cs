@@ -1,5 +1,4 @@
-﻿// Services/DebugDataParser.cs
-using System.Text.RegularExpressions;
+﻿using System.Text.RegularExpressions;
 using DebugInterceptor.Models;
 using Microsoft.Extensions.Logging;
 
@@ -68,7 +67,7 @@ namespace DebugInterceptor.Services
         {
             if (string.IsNullOrEmpty(rawName)) return string.Empty;
 
-            // 👇 Удаляем всё после первого невалидного символа
+            // Удаляем всё после первого невалидного символа
             // Валидные: буквы (кириллица/латиница), цифры, пробелы, подчёркивания, дефисы
             var result = new System.Text.StringBuilder();
 
@@ -89,7 +88,7 @@ namespace DebugInterceptor.Services
 
             var cleaned = result.ToString().Trim();
 
-            // 👇 Дополнительно: убираем повторяющиеся пробелы
+            // Дополнительно: убираем повторяющиеся пробелы
             cleaned = Regex.Replace(cleaned, @"\s+", " ");
 
             _logger?.LogDebug("🧹 Очистка: '{Raw}' → '{Clean}'", rawName, cleaned);
@@ -122,7 +121,7 @@ namespace DebugInterceptor.Services
                 .Replace("]", "")
                 .Replace("'", "''");
 
-            return $"SELECT * FROM [{safeTable}] WHERE [Id] = {record.RowId};";
+            return $"SELECT * FROM stack.[{safeTable}] WHERE [ROW_ID] = {record.RowId};";
         }
     }
 }
