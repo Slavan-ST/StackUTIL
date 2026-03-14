@@ -37,6 +37,7 @@ namespace StackUTIL
                     services.AddSingleton<RegionDetector>();
                     services.AddSingleton<BitmapUtility>();
                     services.AddSingleton<DebugResultProcessor>();
+                    services.AddSingleton<INotificationService, NotificationService>();
                     services.AddSingleton<TooltipValidator>(sp =>
                         new TooltipValidator(
                             sp.GetRequiredService<ILogger<TooltipValidator>>(),

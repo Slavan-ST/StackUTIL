@@ -37,6 +37,7 @@ namespace DebugInterceptor.Services
         private readonly BitmapUtility _bitmapUtility;
         private readonly TooltipValidator _tooltipValidator;  // ← новое поле
         private readonly DebugResultProcessor _resultProcessor;  // ← новое поле
+        private readonly INotificationService _notifier;
 
         #endregion
 
@@ -51,7 +52,8 @@ namespace DebugInterceptor.Services
             BitmapUtility bitmapUtility,  // ← новый параметр
             TooltipValidator tooltipValidator,  // ← новый параметр
             DebugResultProcessor resultProcessor,  // ← новый параметр
-            IServiceProvider serviceProvider)
+            IServiceProvider serviceProvider,
+            INotificationService notifier)
         {
             _logger = logger;
             _captureService = captureService;
@@ -62,6 +64,7 @@ namespace DebugInterceptor.Services
             _resultProcessor = resultProcessor;  // ← инициализация
             _regionDetector = regionDetector;
             _serviceProvider = serviceProvider;
+            _notifier = notifier;
         }
 
         public void InitializeHotkeys(Window mainWindow)
@@ -92,7 +95,6 @@ namespace DebugInterceptor.Services
 
         #endregion
 
-        #region Capture Handler
 
         // ═══════════════════════════════════════════════════════
         // 🔹 Единый обработчик: скрин1 → задержка → скрин2 → анализ
@@ -105,18 +107,18 @@ namespace DebugInterceptor.Services
                 _logger.LogDebug("🔔 Запуск авто-захвата...");
 
                 baseline = _captureService.CaptureFullScreen();
-                if (baseline == null) { ShowError("Не удалось сделать базовый скриншот"); return; }
+                if (baseline == null) { _notifier.ShowError("Не удалось сделать базовый скриншот"); return; }
                 _logger.LogDebug("📸 Базовый: {W}x{H}", baseline.Width, baseline.Height);
 
                 _logger.LogInformation("⏳ Ожидание {Ms} мс...", CaptureDelayMs);
                 await Task.Delay(CaptureDelayMs, token);
 
                 current = _captureService.CaptureFullScreen();
-                if (current == null) { ShowError("Не удалось сделать текущий скриншот"); return; }
+                if (current == null) { _notifier.ShowError("Не удалось сделать текущий скриншот"); return; }
                 _logger.LogDebug("📸 Текущий: {W}x{H}", current.Width, current.Height);
 
                 var regions = _regionDetector.FindChangedRegions(baseline, current);
-                if (regions.Count == 0) { ShowNoChangesWarning(); return; }
+                if (regions.Count == 0) { _notifier.ShowWarning("Не найдено изменений, похожих на тултип.\n\nУбедитесь, что тултип открылся после звукового сигнала.", "Нет изменений"); return; }
 
                 _logger.LogInformation("📦 Найдено регионов: {Count}", regions.Count);
 
@@ -134,35 +136,8 @@ namespace DebugInterceptor.Services
                 }
             }
             catch (OperationCanceledException) { _logger.LogDebug("⚠ Отменено"); }
-            catch (Exception ex) { _logger.LogError(ex, "❌ Ошибка захвата"); ShowError(ex.Message); }
+            catch (Exception ex) { _logger.LogError(ex, "❌ Ошибка захвата"); _notifier.ShowError(ex.Message); }
             finally { baseline?.Dispose(); current?.Dispose(); }
         }, token);
-
-        #endregion
-
-
-        #region UI & Messages
-
-
-        private void ShowNoChangesWarning() => System.Windows.Application.Current.Dispatcher.InvokeAsync(() =>
-            MessageBox.Show(
-                "Не найдено изменений, похожих на тултип.\n\nУбедитесь, что тултип открылся после звукового сигнала.",
-                "Нет изменений", MessageBoxButton.OK, MessageBoxImage.Warning));
-
-        private void ShowError(string message) => System.Windows.Application.Current.Dispatcher.InvokeAsync(() =>
-            MessageBox.Show($"Ошибка:\n{message}", "Ошибка", MessageBoxButton.OK, MessageBoxImage.Error));
-
-
-        #endregion
-
-        #region WinAPI
-
-        [System.Runtime.InteropServices.DllImport("user32.dll")]
-        private static extern bool GetCursorPos(out POINT lpPoint);
-
-        [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
-        private struct POINT { public int X; public int Y; }
-
-        #endregion
     }
 }
