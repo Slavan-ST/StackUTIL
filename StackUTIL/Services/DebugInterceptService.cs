@@ -32,12 +32,13 @@ namespace DebugInterceptor.Services
         // ═══════════════════════════════════════════════════════
         private const Keys VK_F12 = Keys.F12;
         private const int CaptureDelayMs = 500;
-        private const int PixelDiffThreshold = 25;
+        private const int PixelDiffThreshold = 5;
         private const int MinRegionArea = 500;
         private const int MinTooltipW = 100, MaxTooltipW = 900;
         private const int MinTooltipH = 80, MaxTooltipH = 700;
         private const int ConnectedComponentMinSize = 15;
         private const int RegionPadding = 0;
+        private const int ExpansionMargin = 10; // 🔹 Новое: доп. расширение
 
         public DebugInterceptService(
             ILogger<DebugInterceptService> logger,
@@ -151,7 +152,7 @@ namespace DebugInterceptor.Services
             var regions = FindConnectedComponents(changedCoords, current.Width, current.Height);
             _logger.LogDebug("📦 Найдено регионов до фильтрации: {Count}", regions.Count);
 
-            // 3️⃣ Фильтруем по размеру (тултип не может быть слишком маленьким/большим)
+            // 3️⃣ Фильтруем по размеру
             var validRegions = regions.Where(r =>
             {
                 int area = r.Width * r.Height;
@@ -160,26 +161,88 @@ namespace DebugInterceptor.Services
                        r.Height >= MinTooltipH && r.Height <= MaxTooltipH;
             }).ToList();
 
-            // 4️⃣ Если строгая фильтрация ничего не дала — берём любые достаточно большие
             if (validRegions.Count == 0)
             {
                 _logger.LogDebug("⚠ Нет регионов в строгих границах, расширяем поиск");
                 validRegions = regions.Where(r => r.Width * r.Height >= MinRegionArea).ToList();
             }
 
-            // 5️⃣ Добавляем padding к каждому региону
-            var paddedRegions = validRegions.Select(r =>
+            // 4️⃣  Расширяем каждый регион + padding
+            var expandedRegions = validRegions.Select(r =>
             {
+                // 🔹 Сначала расширяем на основе анализа границ
+                var expanded = ExpandRegionToContent(r, current, baseline);
+
+                // 🔹 Затем добавляем фиксированный padding
                 var pad = RegionPadding;
-                int x = Math.Max(0, r.X - pad);
-                int y = Math.Max(0, r.Y - pad);
-                int right = Math.Min(current.Width, r.Right + pad);
-                int bottom = Math.Min(current.Height, r.Bottom + pad);
+                int x = Math.Max(0, expanded.X - pad);
+                int y = Math.Max(0, expanded.Y - pad);
+                int right = Math.Min(current.Width, expanded.Right + pad);
+                int bottom = Math.Min(current.Height, expanded.Bottom + pad);
+
                 return new Rectangle(x, y, right - x, bottom - y);
             }).ToList();
 
-            _logger.LogDebug("✅ Регионов после обработки: {Count}", paddedRegions.Count);
-            return paddedRegions;
+            _logger.LogDebug("✅ Регионов после обработки: {Count}", expandedRegions.Count);
+            return expandedRegions;
+        }
+
+        /// <summary>
+        /// 🔹 Расширяет регион до границ контента (пока есть отличия от baseline)
+        /// </summary>
+        private Rectangle ExpandRegionToContent(Rectangle initial, Bitmap current, Bitmap baseline)
+        {
+            int left = initial.Left;
+            int top = initial.Top;
+            int right = initial.Right;
+            int bottom = initial.Bottom;
+
+            // 🔹 Расширяем влево
+            while (left > 0 && HasSignificantChanges(current, baseline, left - 1, top, left, bottom))
+                left--;
+
+            // 🔹 Расширяем вправо
+            while (right < current.Width && HasSignificantChanges(current, baseline, right, top, right + 1, bottom))
+                right++;
+
+            // 🔹 Расширяем вверх
+            while (top > 0 && HasSignificantChanges(current, baseline, left, top - 1, right, top))
+                top--;
+
+            // 🔹 Расширяем вниз
+            while (bottom < current.Height && HasSignificantChanges(current, baseline, left, bottom, right, bottom + 1))
+                bottom++;
+
+            return Rectangle.FromLTRB(left, top, right, bottom);
+        }
+
+        /// <summary>
+        /// 🔹 Проверяет, есть ли значимые изменения в указанной полосе
+        /// </summary>
+        private bool HasSignificantChanges(Bitmap current, Bitmap baseline, int x1, int y1, int x2, int y2)
+        {
+            int changedPixels = 0;
+            int totalPixels = 0;
+
+            for (int y = y1; y < y2; y++)
+            {
+                for (int x = x1; x < x2; x++)
+                {
+                    if (x < 0 || y < 0 || x >= current.Width || y >= current.Height) continue;
+
+                    var b = baseline.GetPixel(x, y);
+                    var c = current.GetPixel(x, y);
+
+                    int diff = Math.Abs((b.R + b.G + b.B) - (c.R + c.G + c.B)) / 3;
+                    totalPixels++;
+
+                    if (diff > PixelDiffThreshold)
+                        changedPixels++;
+                }
+            }
+
+            // Если хотя бы 20% пикселей в полосе изменились — расширяем
+            return totalPixels > 0 && (double)changedPixels / totalPixels > 0.2;
         }
 
         /// <summary>
