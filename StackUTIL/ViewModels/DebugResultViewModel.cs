@@ -3,6 +3,8 @@ using CommunityToolkit.Mvvm.Input;
 using DebugInterceptor.Models;
 using DebugInterceptor.Views;
 using System.Collections.ObjectModel;
+using System.Windows;
+using System.Windows.Controls;
 
 namespace DebugInterceptor.ViewModels
 {
@@ -11,19 +13,16 @@ namespace DebugInterceptor.ViewModels
         [ObservableProperty]
         private ObservableCollection<DebugRecord> _records = new();
 
-        [ObservableProperty]
-        private DebugRecord? _selectedRecord;
 
         [ObservableProperty]
         private string _statusMessage = string.Empty;
 
-
-        public IRelayCommand CopySelectedQueryCommand { get; }
+        public IRelayCommand CopySelectedCommand { get; }
         public IRelayCommand CloseCommand { get; }
 
         public DebugResultViewModel()
         {
-            CopySelectedQueryCommand = new RelayCommand(CopySelectedQuery, () => SelectedRecord != null);
+            CopySelectedCommand = new RelayCommand(CopySelectedValues);
             CloseCommand = new RelayCommand(() =>
                 System.Windows.Application.Current.Windows
                     .OfType<DebugResultWindow>()
@@ -36,18 +35,42 @@ namespace DebugInterceptor.ViewModels
             foreach (var r in records)
                 Records.Add(r);
 
-            if (Records.Any())
-                SelectedRecord = Records[0];
 
             StatusMessage = $"Найдено записей: {records.Count()}";
         }
 
-        private void CopySelectedQuery()
+        private void CopySelectedValues()
         {
-            if (SelectedRecord?.GeneratedQuery is string query && !string.IsNullOrEmpty(query))
+            // Получаем доступ к DataGrid через окно
+            var window = System.Windows.Application.Current.Windows
+                .OfType<DebugResultWindow>()
+                .FirstOrDefault(w => w.DataContext == this);
+
+            if (window?.FindName("RecordsGrid") is System.Windows.Controls.DataGrid grid && grid.SelectedCells.Any())
             {
-                System.Windows.Clipboard.SetText(query);
-                StatusMessage = "✅ Запрос скопирован в буфер обмена";
+                var values = new List<string>();
+                foreach (var cell in grid.SelectedCells)
+                {
+                    if (cell.Item is DebugRecord record && cell.Column is DataGridBoundColumn column &&
+                        column.Binding is System.Windows.Data.Binding binding && binding.Path?.Path is string path)
+                    {
+                        var value = path switch
+                        {
+                            "RowId" => record.RowId.ToString(),
+                            "TableName" => record.TableName,
+                            "GeneratedQuery" => record.GeneratedQuery,
+                            _ => null
+                        };
+                        if (!string.IsNullOrEmpty(value))
+                            values.Add(value);
+                    }
+                }
+
+                if (values.Any())
+                {
+                    System.Windows.Clipboard.SetText(string.Join("\r\n", values));
+                    StatusMessage = $"✅ Скопировано {values.Count} значений";
+                }
             }
         }
     }

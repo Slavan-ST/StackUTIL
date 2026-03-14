@@ -22,13 +22,15 @@
 
         <!-- Таблица записей -->
         <DataGrid Grid.Row="1" 
-                  ItemsSource="{Binding Records}"
-                  SelectedItem="{Binding SelectedRecord}"
-                  AutoGenerateColumns="False"
-                  CanUserAddRows="False"
-                  IsReadOnly="True"
-                  SelectionMode="Single"
-                  GridLinesVisibility="Horizontal">
+          ItemsSource="{Binding Records}"
+          AutoGenerateColumns="False"
+          CanUserAddRows="False"
+          IsReadOnly="True"
+          SelectionMode="Extended"
+          SelectionUnit="Cell"
+          GridLinesVisibility="Horizontal"
+          PreviewMouseLeftButtonDown="DataGrid_OnPreviewMouseLeftButtonDown"
+          SelectedCellsChanged="DataGrid_OnSelectedCellsChanged">
             <DataGrid.Columns>
                 <DataGridTextColumn Header="Row ID" Binding="{Binding RowId}" Width="80"/>
                 <DataGridTextColumn Header="Таблица" Binding="{Binding TableName}" Width="*"/>
@@ -45,17 +47,17 @@
 
         <!-- Панель действий -->
         <StackPanel Grid.Row="2" Orientation="Horizontal" Margin="0,10,0,10">
-            <Button Content="📋 Копировать SQL" 
-                    Command="{Binding CopySelectedQueryCommand}"
-                    Margin="0,0,8,0" Width="130"
-                    ToolTip="Копировать запрос выбранной записи в буфер обмена"/>
-        </StackPanel>
-
-        <!-- Кнопка закрытия -->
-        <StackPanel Grid.Row="3" Orientation="Horizontal" HorizontalAlignment="Right">
+            <Button Content="📋 Копировать выбранные" 
+                    Command="{Binding CopySelectedCommand}"
+                    Margin="0,0,8,0" Width="160"
+                    ToolTip="Ctrl: добавить к выделению, Shift: диапазон"/>
             <Button Content="✖ Закрыть" 
                     Command="{Binding CloseCommand}"
                     IsCancel="True" Width="100"/>
         </StackPanel>
+
+        <!-- Подсказка -->
+        <TextBlock Grid.Row="3" Text="💡 Клик по ячейке — копировать значение | Ctrl/Shift — мультиселект" 
+                   Foreground="Gray" FontSize="10" HorizontalAlignment="Right"/>
     </Grid>
 </Window>

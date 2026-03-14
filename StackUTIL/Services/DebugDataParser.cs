@@ -20,7 +20,6 @@ namespace DebugInterceptor.Services
 
             _logger?.LogDebug("🔍 Исходный текст:\n{Text}", rawText);
 
-            // Разбиваем на строки и обрабатываем каждую
             var lines = rawText.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
 
             foreach (var line in lines)
@@ -28,16 +27,20 @@ namespace DebugInterceptor.Services
                 var trimmedLine = line.Trim();
                 if (string.IsNullOrEmpty(trimmedLine)) continue;
 
-                // 👇 Ищем паттерн "число : текст"
-                var match = Regex.Match(trimmedLine, @"^(-?\d+)\s*:\s*(.+)$");
+                // 🔧 Гибкая регулярка: допускаем русские буквы, похожие на цифры, в начале числа
+                var match = Regex.Match(trimmedLine, @"^([\dЗ3]+)\s*:\s*(.+)$");
 
                 if (match.Success)
                 {
-                    if (long.TryParse(match.Groups[1].Value, out var rowId))
+                    // 🔧 Очищаем ID: оставляем только цифры, З/з→3
+                    var idRaw = match.Groups[1].Value.Trim();
+                    var idClean = Regex.Replace(idRaw, @"[Зз]", "3");  // Только З→3
+                    idClean = Regex.Replace(idClean, @"[^\d]", "");     // Остальное удаляем
+
+                    if (long.TryParse(idClean, out var rowId))
                     {
                         var tableName = CleanTableName(match.Groups[2].Value.Trim());
 
-                        // Пропускаем пустые или невалидные имена
                         if (string.IsNullOrEmpty(tableName) || !IsValidTableName(tableName))
                         {
                             _logger?.LogDebug("⚠ Пропущено: {Line}", trimmedLine);
@@ -61,19 +64,17 @@ namespace DebugInterceptor.Services
         }
 
         /// <summary>
-        /// Очищает название таблицы от "мусора" OCR
+        /// Очищает название таблицы от "мусора" OCR — БЕЗ агрессивных замен
         /// </summary>
         private string CleanTableName(string rawName)
         {
             if (string.IsNullOrEmpty(rawName)) return string.Empty;
 
-            // Удаляем всё после первого невалидного символа
-            // Валидные: буквы (кириллица/латиница), цифры, пробелы, подчёркивания, дефисы
             var result = new System.Text.StringBuilder();
 
             foreach (var c in rawName)
             {
-                // Разрешаем: буквы, цифры, пробел, подчёркивание, дефис
+                // Разрешаем: буквы (кириллица/латиница), цифры, пробел, подчёркивание, дефис
                 if (char.IsLetterOrDigit(c) || c == '_' || c == '-' || c == ' ')
                 {
                     result.Append(c);
@@ -81,15 +82,12 @@ namespace DebugInterceptor.Services
                 else
                 {
                     // Останавливаемся на первом "мусорном" символе
-                    // (Ё, в, Я, 3 и т.д. — это артефакты OCR)
                     break;
                 }
             }
 
             var cleaned = result.ToString().Trim();
-
-            // Дополнительно: убираем повторяющиеся пробелы
-            cleaned = Regex.Replace(cleaned, @"\s+", " ");
+            cleaned = Regex.Replace(cleaned, @"\s+", " "); // Убираем лишние пробелы
 
             _logger?.LogDebug("🧹 Очистка: '{Raw}' → '{Clean}'", rawName, cleaned);
 
@@ -97,16 +95,16 @@ namespace DebugInterceptor.Services
         }
 
         /// <summary>
-        /// Проверяет, валидно ли имя таблицы
+        /// Проверка валидности имени таблицы
         /// </summary>
         private bool IsValidTableName(string name)
         {
             if (string.IsNullOrWhiteSpace(name)) return false;
-            if (name.Length < 2) return false; // Слишком короткое
-            if (name.Length > 128) return false; // Слишком длинное
+            if (name.Length < 2) return false;
+            if (name.Length > 128) return false;
 
-            // Имя должно начинаться с буквы или подчёркивания
-            if (!char.IsLetter(name[0]) && name[0] != '_') return false;
+            // Должно начинаться с буквы
+            if (!char.IsLetter(name[0])) return false;
 
             // Не должно быть только цифр
             if (name.All(char.IsDigit)) return false;

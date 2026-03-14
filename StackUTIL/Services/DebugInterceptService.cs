@@ -7,58 +7,45 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Text.RegularExpressions;
+using Tesseract;
+using System.Windows;
+using MessageBox = System.Windows.MessageBox;
+using System.IO;
+using System.Drawing;
+using System.Drawing.Imaging;
 
 namespace DebugInterceptor.Services
 {
     public class DebugInterceptService : Microsoft.Extensions.Hosting.BackgroundService
     {
-        // ═══════════════════════════════════════════════════════
-        // WinAPI импорты
-        // ═══════════════════════════════════════════════════════
-
-        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
-        private static extern int GetWindowText(System.IntPtr hWnd, StringBuilder lpString, int nMaxCount);
-
-        [DllImport("user32.dll")]
-        private static extern int GetWindowTextLength(System.IntPtr hWnd);
-
-        [DllImport("user32.dll")]
-        private static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, System.IntPtr lParam);
-
-        [DllImport("user32.dll")]
-        private static extern bool IsWindowVisible(System.IntPtr hWnd);
-
-        private delegate bool EnumWindowsProc(System.IntPtr hWnd, System.IntPtr lParam);
-
-        // ═══════════════════════════════════════════════════════
-        // Поля и зависимости
-        // ═══════════════════════════════════════════════════════
-
         private readonly ILogger<DebugInterceptService> _logger;
         private readonly ScreenCaptureService _captureService;
         private readonly OcrService _ocrService;
         private readonly DebugDataParser _parser;
-        private readonly System.IServiceProvider _serviceProvider;
+        private readonly IServiceProvider _serviceProvider;
 
         private HotkeyService? _hotkeyService;
-        private int _hotkeyId;
-        private System.Threading.CancellationToken _stoppingToken;
+        private int _baselineHotkeyId;
+        private int _captureHotkeyId;
+        private CancellationToken _stoppingToken;
 
-        // Текст для поиска в окне отладки (так как у окна нет заголовка)
-        private readonly string[] _debugWindowKeywords = {
-            "Договор",
-            "Организации",
-            "Категории",
-            "Классификаторы",
-            "Структура"
-        };
+        private Bitmap? _baselineScreenshot;
+        private readonly object _baselineLock = new();
+
+        // 🔧 УМЕНЬШЕН порог для лучшего обнаружения серого фона
+        private const int PixelDiffThreshold = 25;
+        private const int MinRegionArea = 500;
+        // 🔧 РАСШИРЕНЫ диапазоны размеров
+        private const int MinTooltipW = 100, MaxTooltipW = 900;
+        private const int MinTooltipH = 80, MaxTooltipH = 700;
 
         public DebugInterceptService(
             ILogger<DebugInterceptService> logger,
             ScreenCaptureService captureService,
             OcrService ocrService,
             DebugDataParser parser,
-            System.IServiceProvider serviceProvider)
+            IServiceProvider serviceProvider)
         {
             _logger = logger;
             _captureService = captureService;
@@ -67,191 +54,344 @@ namespace DebugInterceptor.Services
             _serviceProvider = serviceProvider;
         }
 
-        // ═══════════════════════════════════════════════════════
-        // Инициализация горячих клавиш
-        // ═══════════════════════════════════════════════════════
-
-        /// <summary>
-        /// Инициализирует горячие клавиши после создания главного окна
-        /// </summary>
         public void InitializeHotkeys(System.Windows.Window mainWindow)
         {
             if (_hotkeyService != null) return;
 
             _hotkeyService = new HotkeyService(mainWindow);
 
-            // Регистрируем Alt+Shift+F11 для перехвата
-            _hotkeyId = _hotkeyService.RegisterCombo(
+            _baselineHotkeyId = _hotkeyService.RegisterCombo(
                 alt: true, shift: true, ctrl: false, win: false,
-                virtualKey: 0x7A, // VK_F11
+                virtualKey: 0x00,
+                callback: () => OnBaselineHotkeyPressed());
+
+            _captureHotkeyId = _hotkeyService.RegisterCombo(
+                alt: true, shift: true, ctrl: false, win: false,
+                virtualKey: 0x7A,
                 callback: () => OnDebugHotkeyPressed(_stoppingToken));
 
-            _logger.LogInformation("✅ Горячая клавиша Alt+Shift+F11 зарегистрирована для перехвата");
+            _logger.LogInformation("✅ Горячие клавиши: Shift+Alt (база), Shift+Alt+F11 (захват)");
         }
 
-        // ═══════════════════════════════════════════════════════
-        // BackgroundService интерфейс
-        // ═══════════════════════════════════════════════════════
-
-        protected override System.Threading.Tasks.Task ExecuteAsync(System.Threading.CancellationToken stoppingToken)
+        protected override Task ExecuteAsync(CancellationToken stoppingToken)
         {
-            // Сохраняем токен для использования в колбэках
             _stoppingToken = stoppingToken;
-
-            // Сервис работает в фоне, основная логика — по событию горячей клавиши
-            return System.Threading.Tasks.Task.CompletedTask;
+            return Task.CompletedTask;
         }
 
-        public override async System.Threading.Tasks.Task StopAsync(System.Threading.CancellationToken cancellationToken)
+        public override async Task StopAsync(CancellationToken cancellationToken)
         {
-            _hotkeyService?.Unregister(_hotkeyId);
+            _hotkeyService?.Unregister(_baselineHotkeyId);
+            _hotkeyService?.Unregister(_captureHotkeyId);
             _hotkeyService?.Dispose();
-            _logger.LogInformation("🛑 Сервис перехвата остановлен");
+            lock (_baselineLock) { _baselineScreenshot?.Dispose(); _baselineScreenshot = null; }
             await base.StopAsync(cancellationToken);
         }
 
-        // ═══════════════════════════════════════════════════════
-        // Обработчик горячей клавиши
-        // ═══════════════════════════════════════════════════════
-
-        private void OnDebugHotkeyPressed(System.Threading.CancellationToken token)
+        private void OnBaselineHotkeyPressed()
         {
-            _ = System.Threading.Tasks.Task.Run(async () =>
+            Task.Run(() =>
             {
                 try
                 {
-                    _logger.LogDebug("🔔 Активирован перехват отладки");
-
-                    // ⏱ Ждём появления всплывающего окна целевого приложения
-                    await System.Threading.Tasks.Task.Delay(200, token);
-
-                    // 🔍 Захватываем активное окно (тултип без заголовка)
-                    // Если не удалось — пробуем найти по ключевым словам
-                    System.Drawing.Bitmap? screenshot = null;
-
-                    // Способ 1: Активное окно
-                    screenshot = _captureService.CaptureLastActiveWindow();
-
-                    // Способ 2: Поиск по тексту внутри окна (если первое не сработало)
-                    if (screenshot == null)
+                    var baseline = _captureService.CaptureFullScreen();
+                    if (baseline == null)
                     {
-                        foreach (var keyword in _debugWindowKeywords)
-                        {
-                            screenshot = _captureService.CaptureWindowByText(keyword, foregroundOnly: false);
-                            if (screenshot != null)
-                            {
-                                _logger.LogDebug("✅ Найдено окно по ключу: {Keyword}", keyword);
-                                break;
-                            }
-                        }
-                    }
-
-                    // Fallback: весь экран (если ничего не найдено)
-                    screenshot ??= _captureService.CaptureFullScreen();
-
-                    if (screenshot == null)
-                    {
-                        _logger.LogWarning("⚠ Не удалось сделать скриншот");
+                        _logger.LogWarning("⚠ Не удалось сделать базовый скриншот");
                         return;
                     }
 
-                    _logger.LogDebug("📸 Скриншот: {Width}x{Height}", screenshot.Width, screenshot.Height);
+                    lock (_baselineLock)
+                    {
+                        _baselineScreenshot?.Dispose();
+                        _baselineScreenshot = baseline;
+                    }
 
-                    // 👇 Сохраняем для отладки
-                    var debugPath = System.IO.Path.Combine(
-                        System.IO.Path.GetTempPath(),
-                        $"debug_{System.DateTime.Now:yyyyMMdd_HHmmss}.png");
-                    screenshot.Save(debugPath, System.Drawing.Imaging.ImageFormat.Png);
-                    _logger.LogDebug("💾 Скриншот сохранён: {Path}", debugPath);
+                    _logger.LogInformation("✅ Базовый скриншот: {W}x{H}", baseline.Width, baseline.Height);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "❌ Ошибка сохранения базового скриншота");
+                }
+            }, _stoppingToken);
+        }
 
-                    // 2. OCR-распознавание
-                    _logger.LogDebug("🔍 Запускаем OCR...");
-                    var rawText = _ocrService.Recognize(screenshot);
-                    _logger.LogDebug("📝 OCR результат:\n{Text}", rawText?.Trim());
+        private Rectangle? FindChangedRegion(Bitmap baseline, Bitmap current)
+        {
+            if (baseline.Width != current.Width || baseline.Height != current.Height)
+                return null;
 
-                    // 3. Парсинг записей
+            var changed = new List<(int x, int y)>();
+            for (int y = 0; y < baseline.Height; y++)
+            {
+                for (int x = 0; x < baseline.Width; x++)
+                {
+                    var b = baseline.GetPixel(x, y);
+                    var c = current.GetPixel(x, y);
+                    int diff = Math.Abs((b.R + b.G + b.B) - (c.R + c.G + c.B)) / 3;
+                    if (diff > PixelDiffThreshold)
+                        changed.Add((x, y));
+                }
+            }
+
+            _logger.LogDebug("🔍 Найдено {Count} изменённых пикселей", changed.Count);
+
+            if (changed.Count < MinRegionArea)
+                return null;
+
+            var regions = FindConnectedComponents(changed, baseline.Width, baseline.Height);
+            _logger.LogDebug("📦 Найдено {Count} регионов", regions.Count);
+
+            // 🔧 ФИЛЬТРУЕМ по размеру, но более мягко
+            var candidates = regions.Where(r =>
+            {
+                int area = r.Width * r.Height;
+                return area >= MinRegionArea &&
+                       r.Width >= MinTooltipW && r.Width <= MaxTooltipW &&
+                       r.Height >= MinTooltipH && r.Height <= MaxTooltipH;
+            }).ToList();
+
+            if (candidates.Count == 0)
+            {
+                // 🔧 Если нет кандидатов — берём ЛЮБОЙ регион подходящего размера
+                candidates = regions.Where(r => r.Width * r.Height >= MinRegionArea).ToList();
+                _logger.LogDebug("⚠ Точных кандидатов нет, используем {Count} регионов без строгой фильтрации", candidates.Count);
+            }
+
+            if (candidates.Count == 0)
+                return null;
+
+            var best = candidates.OrderByDescending(r =>
+            {
+                int count = 0;
+                foreach (var p in changed)
+                    if (r.Contains(p.x, p.y)) count++;
+                return (double)count / (r.Width * r.Height);
+            }).First();
+
+            // 🔧 УВЕЛИЧЕН запас для захвата всего тултипа
+            int pad = 60;
+            return new Rectangle(
+                Math.Max(0, best.X - pad),
+                Math.Max(0, best.Y - pad),
+                Math.Min(baseline.Width, best.Width + pad),
+                Math.Min(baseline.Height, best.Height + pad * 2));
+        }
+
+        private List<Rectangle> FindConnectedComponents(List<(int x, int y)> pixels, int width, int height)
+        {
+            var visited = new HashSet<(int, int)>();
+            var regions = new List<Rectangle>();
+
+            foreach (var start in pixels)
+            {
+                if (visited.Contains(start)) continue;
+
+                var queue = new Queue<(int, int)>();
+                queue.Enqueue(start);
+                visited.Add(start);
+
+                int minX = start.x, maxX = start.x;
+                int minY = start.y, maxY = start.y;
+                int count = 1;
+
+                while (queue.Count > 0)
+                {
+                    var (x, y) = queue.Dequeue();
+
+                    foreach (var (nx, ny) in new[] { (x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1) })
+                    {
+                        if (nx < 0 || ny < 0 || nx >= width || ny >= height) continue;
+                        var key = (nx, ny);
+                        if (!visited.Contains(key) && pixels.Contains(key))
+                        {
+                            visited.Add(key);
+                            queue.Enqueue(key);
+                            minX = Math.Min(minX, nx); maxX = Math.Max(maxX, nx);
+                            minY = Math.Min(minY, ny); maxY = Math.Max(maxY, ny);
+                            count++;
+                        }
+                    }
+                }
+
+                if (count >= 15)
+                    regions.Add(new Rectangle(minX, minY, maxX - minX + 1, maxY - minY + 1));
+            }
+
+            return regions;
+        }
+
+        private Bitmap CropBitmap(Bitmap source, Rectangle area)
+        {
+            var cropped = new Bitmap(area.Width, area.Height);
+            using (var g = Graphics.FromImage(cropped))
+            {
+                g.DrawImage(source,
+                    new Rectangle(0, 0, area.Width, area.Height),
+                    area,
+                    GraphicsUnit.Pixel);
+            }
+            return cropped;
+        }
+
+        /// <summary>
+        /// 🔧 ИСПРАВЛЕНО: используем PageSegMode.SingleBlock вместо SingleLine
+        /// </summary>
+        private bool ContainsTooltipHeader(Bitmap bitmap)
+        {
+            try
+            {
+                var tessDataPath = Path.Combine(AppContext.BaseDirectory, "tessdata");
+                using var engine = new TesseractEngine(tessDataPath, "rus", EngineMode.Default);
+                // 🔧 SingleBlock лучше для поиска заголовка
+                engine.DefaultPageSegMode = PageSegMode.SingleBlock;
+
+                var tempPath = Path.Combine(Path.GetTempPath(), $"chk_{Guid.NewGuid():N}.png");
+                try
+                {
+                    bitmap.Save(tempPath, System.Drawing.Imaging.ImageFormat.Png);
+                    using var pix = Pix.LoadFromFile(tempPath);
+                    using var page = engine.Process(pix);
+                    var text = page.GetText()?.ToLower() ?? "";
+
+                    _logger.LogDebug("🔍 Проверка заголовка: '{Text}'", text.Substring(0, Math.Min(100, text.Length)));
+
+                    return text.Contains("структура") && text.Contains("запис");
+                }
+                finally { if (File.Exists(tempPath)) File.Delete(tempPath); }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "⚠ Ошибка проверки заголовка");
+                return false;
+            }
+        }
+
+        private void OnDebugHotkeyPressed(CancellationToken token)
+        {
+            _ = Task.Run(async () =>
+            {
+                Bitmap? baseline = null;
+                Bitmap? current = null;
+                Bitmap? result = null;
+
+                try
+                {
+                    _logger.LogDebug("🔔 Запрос захвата тултипа");
+
+                    lock (_baselineLock)
+                    {
+                        if (_baselineScreenshot == null)
+                        {
+                            _logger.LogWarning("⚠ Базовый скриншот не сохранён!");
+                            _ = System.Windows.Application.Current.Dispatcher.InvokeAsync(() =>
+                            {
+                                MessageBox.Show(
+                                    "Сначала нажмите 🔹 Shift+Alt для сохранения базового скриншота,\n" +
+                                    "затем откройте тултип и нажмите 🔹 Shift+Alt+F11",
+                                    "StackUTIL", MessageBoxButton.OK, MessageBoxImage.Information);
+                            });
+                            return;
+                        }
+                        baseline = new Bitmap(_baselineScreenshot);
+                    }
+
+                    current = _captureService.CaptureFullScreen();
+                    if (current == null)
+                    {
+                        _logger.LogWarning("⚠ Не удалось сделать текущий скриншот");
+                        return;
+                    }
+
+                    var diffRect = FindChangedRegion(baseline, current);
+                    if (diffRect == null)
+                    {
+                        _logger.LogWarning("⚠ Изменения не найдены или не похожи на тултип");
+                        _ = System.Windows.Application.Current.Dispatcher.InvokeAsync(() =>
+                        {
+                            MessageBox.Show(
+                                "Не найдено изменений, похожих на тултип.\n\n" +
+                                "Проверьте:\n" +
+                                "• Тултип 'Структура записи' открыт и виден целиком\n" +
+                                "• Между нажатиями не было других изменений",
+                                "Нет изменений", MessageBoxButton.OK, MessageBoxImage.Warning);
+                        });
+                        return;
+                    }
+
+                    _logger.LogInformation("📐 Регион изменений: {X},{Y} {W}x{H}",
+                        diffRect.Value.X, diffRect.Value.Y, diffRect.Value.Width, diffRect.Value.Height);
+
+                    result = CropBitmap(current, diffRect.Value);
+
+                    // 🔧 Теперь это ПРЕДУПРЕЖДЕНИЕ, а не блокировка
+                    if (!ContainsTooltipHeader(result))
+                    {
+                        _logger.LogWarning("⚠ В регионе не найдено 'Структура записи', но продолжаем...");
+                        // Не прерываем выполнение!
+                    }
+
+                    var debugPath = Path.Combine(Path.GetTempPath(),
+                        $"diff_{DateTime.Now:yyyyMMdd_HHmmss}.png");
+                    result.Save(debugPath, System.Drawing.Imaging.ImageFormat.Png);
+                    _logger.LogDebug("💾 Diff-скриншот: {Path}", debugPath);
+
+                    _logger.LogDebug("🔍 OCR...");
+                    var rawText = _ocrService.Recognize(result);
+                    _logger.LogDebug("📝 Текст:\n{Text}", rawText?.Trim());
+
                     var records = _parser.Parse(rawText);
-                    _logger.LogDebug("📋 Найдено записей: {Count}", records.Count);
+                    _logger.LogDebug("📋 Записей: {Count}", records.Count);
 
                     if (records.Any())
                     {
-                        // Генерируем SQL-запросы для каждой записи
                         foreach (var record in records)
-                        {
                             record.GeneratedQuery = _parser.GenerateSelectQuery(record);
-                        }
 
-                        // Показываем окно результатов в потоке UI
                         await System.Windows.Application.Current.Dispatcher.InvokeAsync(() =>
                         {
                             var window = _serviceProvider.GetRequiredService<DebugResultWindow>();
                             var viewModel = _serviceProvider.GetRequiredService<DebugResultViewModel>();
-
                             viewModel.LoadRecords(records);
                             window.DataContext = viewModel;
                             window.Show();
                             window.Activate();
                             window.Topmost = true;
                         });
-
-                        _logger.LogInformation("✅ Окно результатов показано, записей: {Count}", records.Count);
+                        _logger.LogInformation("✅ Показано {Count} записей", records.Count);
                     }
                     else
                     {
-                        _logger.LogWarning("⚠ Не найдено записей в формате 'число: слово'");
-
-                        // Показываем распознанный текст для отладки
                         await System.Windows.Application.Current.Dispatcher.InvokeAsync(() =>
                         {
-                            System.Windows.MessageBox.Show(
-                                $"OCR распознал:\n---\n{rawText?.Substring(0, System.Math.Min(400, rawText?.Length ?? 0))}\n---\n\n" +
-                                $"Не найдено записей вида '12345: table'.\n\n" +
-                                $"Проверьте:\n• Язык распознавания (rus)\n• Контрастность текста в окне",
-                                "Результат OCR",
-                                System.Windows.MessageBoxButton.OK,
-                                System.Windows.MessageBoxImage.Information);
+                            MessageBox.Show(
+                                $"Распознано:\n---\n{rawText?.Substring(0, Math.Min(300, rawText?.Length ?? 0))}...\n---\n\n" +
+                                "Не найдено записей вида '12345 : Таблица'.",
+                                "Результат", MessageBoxButton.OK, MessageBoxImage.Information);
                         });
                     }
                 }
-                catch (System.OperationCanceledException)
+                catch (OperationCanceledException)
                 {
-                    _logger.LogDebug("⚠ Операция отменена");
+                    _logger.LogDebug("⚠ Отменено");
                 }
-                catch (System.Exception ex)
+                catch (Exception ex)
                 {
-                    _logger.LogError(ex, "❌ Ошибка при обработке перехвата");
-
-                    await System.Windows.Application.Current.Dispatcher.InvokeAsync(() =>
-                    {
-                        System.Windows.MessageBox.Show(
-                            $"Ошибка перехвата:\n{ex.Message}",
-                            "Ошибка",
-                            System.Windows.MessageBoxButton.OK,
-                            System.Windows.MessageBoxImage.Error);
-                    });
+                    _logger.LogError(ex, "❌ Ошибка");
+                    _ = System.Windows.Application.Current.Dispatcher.InvokeAsync(() =>
+                        MessageBox.Show($"Ошибка:\n{ex.Message}", "Ошибка",
+                            MessageBoxButton.OK, MessageBoxImage.Error));
                 }
                 finally
                 {
-                    // Освобождаем ресурсы скриншота
-                    // (using уже отработает, но на всякий случай)
+                    baseline?.Dispose();
+                    current?.Dispose();
+                    result?.Dispose();
                 }
             }, token);
         }
 
-        // ═══════════════════════════════════════════════════════
-        // Вспомогательные методы
-        // ═══════════════════════════════════════════════════════
-
-        /// <summary>
-        /// Проверяет, похоже ли содержимое на отладочное окно
-        /// (ищет паттерн "число : текст")
-        /// </summary>
-        private static bool LooksLikeDebugWindow(string? text)
-        {
-            if (string.IsNullOrEmpty(text)) return false;
-
-            // Регулярка: цифры, возможно с минусом, двоеточие, слово
-            return System.Text.RegularExpressions.Regex.IsMatch(text, @"-?\d+\s*:\s*\w+");
-        }
+        private static bool LooksLikeDebugWindow(string? text) =>
+            !string.IsNullOrEmpty(text) && Regex.IsMatch(text, @"-?\d+\s*:\s*\w+");
     }
 }
