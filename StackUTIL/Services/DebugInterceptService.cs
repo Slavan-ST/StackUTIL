@@ -33,16 +33,10 @@ namespace DebugInterceptor.Services
         // ═══════════════════════════════════════════════════════
         private const Keys VK_F12 = Keys.F12;
         private const int CaptureDelayMs = 500;
-        private const int PixelDiffThreshold = 5;
-        private const int MinRegionArea = 500;
-        private const int MinTooltipW = 100, MaxTooltipW = 900;
-        private const int MinTooltipH = 80, MaxTooltipH = 700;
-        private const int ConnectedComponentMinSize = 15;
-        private const int RegionPadding = 0;
-        private const int ExpansionMargin = 10;
         private readonly RegionDetector _regionDetector;
         private readonly BitmapUtility _bitmapUtility;
         private readonly TooltipValidator _tooltipValidator;  // ← новое поле
+        private readonly DebugResultProcessor _resultProcessor;  // ← новое поле
 
         #endregion
 
@@ -56,16 +50,18 @@ namespace DebugInterceptor.Services
             RegionDetector regionDetector,
             BitmapUtility bitmapUtility,  // ← новый параметр
             TooltipValidator tooltipValidator,  // ← новый параметр
+            DebugResultProcessor resultProcessor,  // ← новый параметр
             IServiceProvider serviceProvider)
         {
             _logger = logger;
             _captureService = captureService;
             _ocrService = ocrService;
             _parser = parser;
-            _serviceProvider = serviceProvider;
             _bitmapUtility = bitmapUtility;  // ← инициализация
             _tooltipValidator = tooltipValidator;  // ← инициализация
-            _regionDetector = regionDetector;  
+            _resultProcessor = resultProcessor;  // ← инициализация
+            _regionDetector = regionDetector;
+            _serviceProvider = serviceProvider;
         }
 
         public void InitializeHotkeys(Window mainWindow)
@@ -130,12 +126,11 @@ namespace DebugInterceptor.Services
                         region.X, region.Y, region.Width, region.Height);
 
                     using var cropped = _bitmapUtility.CropBitmap(current, region);
-                    _bitmapUtility.SaveDebugWithRegion(current, region, "region_debug");
 
                     if (!_tooltipValidator.ContainsTooltipHeader(cropped))
                         _logger.LogWarning("⚠ Заголовок 'Структура записи' не найден, продолжаем...");
 
-                    await ProcessAndShowResult(cropped);
+                    await _resultProcessor.ProcessRegionAsync(cropped, region, current);
                 }
             }
             catch (OperationCanceledException) { _logger.LogDebug("⚠ Отменено"); }
@@ -146,73 +141,8 @@ namespace DebugInterceptor.Services
         #endregion
 
 
-        #region OCR & Processing
-
-
-        // ═══════════════════════════════════════════════════════
-        // 🔹 Обработка результата
-        // ═══════════════════════════════════════════════════════
-        private async Task ProcessAndShowResult(Bitmap region)
-        {
-            var debugPath = Path.Combine(Path.GetTempPath(), $"diff_{DateTime.Now:yyyyMMdd_HHmmss}.png");
-            region.Save(debugPath, System.Drawing.Imaging.ImageFormat.Png);
-            _logger.LogDebug("💾 Diff: {Path}", debugPath);
-
-            var rawText = _ocrService.Recognize(region);
-            _logger.LogDebug("📝 OCR:\n{Text}", rawText?.Trim());
-
-            var records = _parser.Parse(rawText);
-            _logger.LogDebug("📋 Записей: {Count}", records.Count);
-
-            if (records.Any())
-            {
-                foreach (var r in records) r.GeneratedQuery = _parser.GenerateSelectQuery(r);
-                await ShowResultsWindow(records);
-                _logger.LogInformation("✅ Показано {Count} записей", records.Count);
-            }
-            else ShowOcrFallback(rawText);
-        }
-
-        #endregion
-
         #region UI & Messages
 
-        // ═══════════════════════════════════════════════════════
-        // 🔹 Показ окна с результатами (середина левой стороны на курсоре)
-        // ═══════════════════════════════════════════════════════
-        private async Task ShowResultsWindow(List<DebugRecord> records) =>
-            await System.Windows.Application.Current.Dispatcher.InvokeAsync(() =>
-            {
-                var window = _serviceProvider.GetRequiredService<DebugResultWindow>();
-                var vm = _serviceProvider.GetRequiredService<DebugResultViewModel>();
-                vm.LoadRecords(records);
-                window.DataContext = vm;
-
-                GetCursorPos(out var cursorPos);
-
-                window.Left = cursorPos.X;
-                window.Top = cursorPos.Y - (window.Height / 2);
-
-                var screenWidth = System.Windows.SystemParameters.WorkArea.Width;
-                var screenHeight = System.Windows.SystemParameters.WorkArea.Height;
-                var windowWidth = window.Width;
-                var windowHeight = window.Height;
-
-                if (cursorPos.X + windowWidth > screenWidth)
-                    window.Left = Math.Max(0, cursorPos.X - windowWidth);
-                if (window.Top < 0) window.Top = 0;
-                if (window.Top + windowHeight > screenHeight)
-                    window.Top = Math.Max(0, screenHeight - windowHeight);
-
-                window.Show();
-                window.Activate();
-                window.Topmost = true;
-            });
-
-        private void ShowOcrFallback(string? rawText) => System.Windows.Application.Current.Dispatcher.InvokeAsync(() =>
-            MessageBox.Show(
-                $"Распознано:\n---\n{rawText?[..Math.Min(300, rawText.Length)]}...\n---\n\nНе найдено записей вида '12345 : Таблица'.",
-                "Результат", MessageBoxButton.OK, MessageBoxImage.Information));
 
         private void ShowNoChangesWarning() => System.Windows.Application.Current.Dispatcher.InvokeAsync(() =>
             MessageBox.Show(
@@ -222,8 +152,6 @@ namespace DebugInterceptor.Services
         private void ShowError(string message) => System.Windows.Application.Current.Dispatcher.InvokeAsync(() =>
             MessageBox.Show($"Ошибка:\n{message}", "Ошибка", MessageBoxButton.OK, MessageBoxImage.Error));
 
-        private static bool LooksLikeDebugWindow(string? text) =>
-            !string.IsNullOrEmpty(text) && Regex.IsMatch(text, @"-?\d+\s*:\s*\w+");
 
         #endregion
 
