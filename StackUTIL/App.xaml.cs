@@ -1,12 +1,8 @@
-﻿using DebugInterceptor.Models;
-using DebugInterceptor.Services;
-using DebugInterceptor.ViewModels;
-using DebugInterceptor.Views;
+﻿using DebugInterceptor.Services;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
-using Microsoft.Extensions.Options;
-using StackUTIL.Models.Enums;
+using StackUTIL.Services; // ← namespace с расширениями
 using System.IO;
 using System.Windows;
 
@@ -20,7 +16,6 @@ namespace StackUTIL
 
         public App()
         {
-            var tessDataPath = Path.Combine(AppContext.BaseDirectory, "tessdata");
             _host = Host.CreateDefaultBuilder()
                 .ConfigureLogging(logging =>
                 {
@@ -30,98 +25,10 @@ namespace StackUTIL
                 })
                 .ConfigureServices((context, services) =>
                 {
-                    // ==========================================
-                    // ⚙️ Настройки через IOptions<T>
-                    // ==========================================
-                    services.Configure<DebugInterceptorSettings>(
-                        context.Configuration.GetSection("DebugInterceptor"));
+                    // ✅ Вся регистрация — в одном методе
+                    services.AddDebugInterceptorServices(context.Configuration);
 
-                    // ==========================================
-                    // 📦 Основные сервисы (Singleton)
-                    // ==========================================
-                    services.AddSingleton<ScreenCaptureService>();
-                    services.AddSingleton<OcrService>();
-                    services.AddSingleton<DebugDataParser>();
-                    services.AddSingleton<BitmapUtility>();
-
-
-                    services.AddSingleton<INotificationService>(sp =>
-                    {
-                        var settings = sp.GetRequiredService<IOptions<DebugInterceptorSettings>>().Value;
-                        var logger = sp.GetRequiredService<ILogger<INotificationService>>();
-
-                        return settings.NotificationMode switch
-                        {
-                            NotificationMode.LogOnly => new LoggingNotificationService(
-                                sp.GetRequiredService<ILogger<LoggingNotificationService>>()),
-
-                            NotificationMode.Both => new CompositeNotificationService(
-                                new NotificationService(logger),
-                                new LoggingNotificationService(
-                                    sp.GetRequiredService<ILogger<LoggingNotificationService>>())),
-
-                            NotificationMode.MessageBox => new NotificationService(logger),
-
-                            _ => new NotificationService(logger) // fallback
-                        };
-                    });
-
-                    // Сервисы, зависящие от настроек (передаём IOptions<T>, не .Value!)
-                    services.AddSingleton<RegionDetector>(sp =>
-                    {
-                        var logger = sp.GetRequiredService<ILogger<RegionDetector>>();
-                        var settings = sp.GetRequiredService<IOptions<DebugInterceptorSettings>>();
-                        return new RegionDetector(logger, settings);  // ← IOptions<T>
-                    });
-
-                    services.AddSingleton<TooltipValidator>(sp =>
-                    {
-                        var logger = sp.GetRequiredService<ILogger<TooltipValidator>>();
-                        var settings = sp.GetRequiredService<IOptions<DebugInterceptorSettings>>();
-                        // Путь вычисляется внутри конструктора TooltipValidator
-                        return new TooltipValidator(logger, settings);
-                    });
-
-                    services.AddSingleton<DebugResultProcessor>(sp =>
-                    {
-                        var logger = sp.GetRequiredService<ILogger<DebugResultProcessor>>();
-                        var ocr = sp.GetRequiredService<OcrService>();
-                        var parser = sp.GetRequiredService<DebugDataParser>();
-                        var serviceProvider = sp;
-                        var bitmapUtil = sp.GetRequiredService<BitmapUtility>();
-                        return new DebugResultProcessor(logger, ocr, parser, serviceProvider, bitmapUtil);
-                    });
-
-                    // ==========================================
-                    // 🔥 DebugInterceptService (оркестратор)
-                    // ==========================================
-                    services.AddSingleton<DebugInterceptService>(sp =>
-                    {
-                        return new DebugInterceptService(
-                            sp.GetRequiredService<ILogger<DebugInterceptService>>(),
-                            sp.GetRequiredService<ScreenCaptureService>(),
-                            sp.GetRequiredService<OcrService>(),
-                            sp.GetRequiredService<DebugDataParser>(),
-                            sp.GetRequiredService<RegionDetector>(),
-                            sp.GetRequiredService<BitmapUtility>(),
-                            sp.GetRequiredService<TooltipValidator>(),
-                            sp.GetRequiredService<DebugResultProcessor>(),
-                            sp,
-                            sp.GetRequiredService<INotificationService>(),
-                            sp.GetRequiredService<IOptions<DebugInterceptorSettings>>()  // ← передаём IOptions<T>
-                        );
-                    });
-
-                    // ==========================================
-                    // 🪟 UI: Окна и ViewModel (Transient)
-                    // ==========================================
-                    services.AddTransient<DebugResultWindow>();
-                    services.AddTransient<DebugResultViewModel>();
-                    services.AddTransient<MainWindow>();
-
-                    // ==========================================
                     // 📡 TrayService (фоновый сервис)
-                    // ==========================================
                     services.AddSingleton<TrayService>();
                     services.AddHostedService(sp => sp.GetRequiredService<TrayService>());
                 })
@@ -150,15 +57,10 @@ namespace StackUTIL
             }
 
             var trayService = _host.Services.GetRequiredService<TrayService>();
-            _logger.LogDebug($"🔍 TrayService из контейнера: {trayService.GetHashCode()}");
-
             _mainWindow = new MainWindow();
             trayService?.SetMainWindow(_mainWindow);
-            _logger.LogTrace($"🪟 MainWindow создан (HashCode: {_mainWindow.GetHashCode()})");
 
-            _logger.LogTrace("🪟 MainWindow.Loaded: инициализация хоткеев");
             InitializeHotkeysSafely(_mainWindow);
-
             base.OnStartup(e);
         }
 
@@ -167,12 +69,7 @@ namespace StackUTIL
             try
             {
                 var interceptService = _host.Services.GetService<DebugInterceptService>();
-                if (interceptService == null)
-                {
-                    _logger.LogWarning("⚠️ interceptService не найден");
-                    return;
-                }
-                interceptService.InitializeHotkeys(mainWindow);
+                interceptService?.InitializeHotkeys(mainWindow);
                 _logger.LogInformation("🎉 Горячие клавиши инициализированы");
             }
             catch (Exception ex)
