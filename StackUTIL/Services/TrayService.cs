@@ -1,6 +1,7 @@
 ﻿using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using StackUTIL;
+using System.Runtime.InteropServices.JavaScript;
 using System.Windows;
 using System.Windows.Forms;
 using Application = System.Windows.Application;
@@ -290,18 +291,12 @@ namespace DebugInterceptor.Services
             menu.Items.Add(new ToolStripSeparator());
 
             var exitItem = new ToolStripMenuItem("Выход");
-            exitItem.Click += async (s, e) =>
+            exitItem.Click += (s, e) =>
             {
                 _logger.LogInformation("👋 Завершение работы из трея");
-                if (Application.Current != null)
-                {
-                    await Application.Current.Dispatcher.InvokeAsync(() =>
-                        Application.Current.Shutdown(0));
-                }
-                else
-                {
-                    Environment.Exit(0);
-                }
+
+                // Принудительно завершаем процесс
+                Environment.Exit(0);
             };
             menu.Items.Add(exitItem);
 

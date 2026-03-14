@@ -3,6 +3,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using StackUTIL.Services;
+using System.IO;
 using System.Windows;
 
 namespace StackUTIL
@@ -15,6 +16,14 @@ namespace StackUTIL
 
         public App()
         {
+            // Глобальный перехват необработанных исключений
+            AppDomain.CurrentDomain.UnhandledException += (s, e) =>
+            {
+                var ex = e.ExceptionObject as Exception;
+                var path = Path.Combine(AppContext.BaseDirectory, "fatal_error.log");
+                File.WriteAllText(path, ex?.ToString());
+            };
+
             _host = Host.CreateDefaultBuilder()
                 .ConfigureLogging(logging =>
                 {
@@ -41,8 +50,10 @@ namespace StackUTIL
             }
             catch (Exception ex)
             {
-                System.Windows.MessageBox.Show($"Не удалось запустить приложение:\n{ex.Message}",
-                    "Ошибка", MessageBoxButton.OK, MessageBoxImage.Error);
+                var path = Path.Combine(AppContext.BaseDirectory, "startup_error.log");
+                File.WriteAllText(path, ex.ToString()); // Пишет всё дерево исключений
+
+                System.Windows.MessageBox.Show($"Ошибка:\n{ex.InnerException?.Message ?? ex.Message}", "Ошибка", MessageBoxButton.OK, MessageBoxImage.Error);
                 Shutdown(1);
                 return;
             }
