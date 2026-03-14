@@ -28,14 +28,18 @@ namespace DebugInterceptor.Services
                 if (string.IsNullOrEmpty(trimmedLine)) continue;
 
                 // 🔧 Гибкая регулярка: допускаем русские буквы, похожие на цифры, в начале числа
-                var match = Regex.Match(trimmedLine, @"^([\dЗ3]+)\s*:\s*(.+)$");
+                var match = Regex.Match(trimmedLine, @"^([-=]?\s*[\dЗ3]+)\s*:\s*(.+)$");
 
                 if (match.Success)
                 {
-                    // 🔧 Очищаем ID: оставляем только цифры, З/з→3
                     var idRaw = match.Groups[1].Value.Trim();
-                    var idClean = Regex.Replace(idRaw, @"[Зз]", "3");  // Только З→3
-                    idClean = Regex.Replace(idClean, @"[^\d]", "");     // Остальное удаляем
+
+                    // 🔧 Нормализуем: = → - (частая ошибка OCR), затем чистим
+                    idRaw = idRaw.Replace("=", "-");
+
+                    // Очищаем: оставляем только цифры, знак минуса, и З/з→3
+                    var idClean = Regex.Replace(idRaw, @"[Зз]", "3");
+                    idClean = Regex.Replace(idClean, @"[^\d-]", "");  // ← добавили "-" в разрешённые символы
 
                     if (long.TryParse(idClean, out var rowId))
                     {
