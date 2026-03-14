@@ -1,10 +1,7 @@
-﻿// Services/TrayService.cs
-using Microsoft.Extensions.Hosting;
+﻿using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using StackUTIL;
-using System;
 using System.Windows;
-using System.Windows.Forms;
 using Application = System.Windows.Application;
 
 namespace DebugInterceptor.Services
@@ -15,25 +12,33 @@ namespace DebugInterceptor.Services
     public class TrayService : IHostedService, IDisposable
     {
         private readonly ILogger<TrayService> _logger;
-        private readonly Func<MainWindow> _mainWindowFactory;
-
         private NotifyIcon? _notifyIcon;
-        private MainWindow? _mainWindow; // 👈 Ссылка на окно (устанавливается извне)
+        private MainWindow? _mainWindow;
         private bool _isDisposed;
+        private readonly object _lock = new();
 
-        public TrayService(ILogger<TrayService> logger, Func<MainWindow> mainWindowFactory)
+        public TrayService(ILogger<TrayService> logger)
         {
             _logger = logger;
-            _mainWindowFactory = mainWindowFactory;
+            _logger.LogDebug("🔧 TrayService.ctor: экземпляр создан");
         }
 
         /// <summary>
-        /// Устанавливает ссылку на главное окно (вызывается из App.xaml.cs после создания окна).
+        /// Устанавливает ссылку на главное окно.
         /// </summary>
         public void SetMainWindow(MainWindow window)
         {
-            _mainWindow = window;
-            _logger.LogDebug("🪟 TrayService получил ссылку на MainWindow");
+            if (window == null)
+            {
+                _logger.LogWarning("⚠️ SetMainWindow: передано null");
+                return;
+            }
+
+            lock (_lock)
+            {
+                _mainWindow = window;
+                _logger.LogDebug($"🪟 SetMainWindow: окно назначено (HashCode: {window.GetHashCode()})");
+            }
         }
 
         public Task StartAsync(CancellationToken cancellationToken)
@@ -41,81 +46,161 @@ namespace DebugInterceptor.Services
             if (cancellationToken.IsCancellationRequested)
                 return Task.CompletedTask;
 
-            _logger.LogDebug("📡 Инициализация TrayService...");
+            _logger.LogDebug("📡 TrayService.StartAsync: инициализация...");
 
-            _notifyIcon = new NotifyIcon
+            // Создаём иконку только если Application уже инициализирован
+            if (Application.Current != null)
             {
-                Icon = System.Drawing.Icon.ExtractAssociatedIcon(
-                    Environment.ProcessPath ??
-                    System.Reflection.Assembly.GetEntryAssembly()?.Location ??
-                    "app.ico"),
-                Text = "StackUTIL",
-                Visible = true
-            };
-
-            _notifyIcon.MouseDoubleClick += (s, e) =>
+                if (Application.Current.Dispatcher.CheckAccess())
+                    CreateNotifyIcon();
+                else
+                    Application.Current.Dispatcher.Invoke(CreateNotifyIcon);
+                _logger.LogInformation("✅ TrayService запущен, иконка создана");
+            }
+            else
             {
-                if (e.Button == MouseButtons.Left)
-                    ToggleMainWindow();
-            };
+                _logger.LogWarning("⚠️ Application.Current = null, откладываем создание иконки");
+                // Подписываемся на инициализацию приложения
+                System.Windows.Application.Current.Startup += OnApplicationStartup;
+            }
 
-            _notifyIcon.ContextMenuStrip = CreateContextMenu();
-
-            _logger.LogInformation("✅ TrayService запущен");
             return Task.CompletedTask;
+        }
+
+        private void OnApplicationStartup(object? sender, StartupEventArgs e)
+        {
+            System.Windows.Application.Current.Startup -= OnApplicationStartup;
+            _logger.LogDebug("🔄 Application.Startup сработал, создаём иконку...");
+            CreateNotifyIcon();
+        }
+
+        private void CreateNotifyIcon()
+        {
+            try
+            {
+                var iconPath = Environment.ProcessPath ??
+                               System.Reflection.Assembly.GetEntryAssembly()?.Location ??
+                               "app.ico";
+
+                _notifyIcon = new NotifyIcon
+                {
+                    Icon = System.Drawing.Icon.ExtractAssociatedIcon(iconPath) ??
+                           System.Drawing.SystemIcons.Application,
+                    Text = "StackUTIL",
+                    Visible = true
+                };
+
+                _notifyIcon.MouseDoubleClick += OnNotifyIconMouseDoubleClick;
+                _notifyIcon.ContextMenuStrip = CreateContextMenu();
+
+                _logger.LogDebug("✅ NotifyIcon создан");
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "❌ Ошибка создания NotifyIcon");
+            }
+        }
+
+        private void OnNotifyIconMouseDoubleClick(object? sender, MouseEventArgs e)
+        {
+            if (e.Button == MouseButtons.Left)
+            {
+                _logger.LogDebug("🖱️ Двойной клик по трею");
+                ToggleMainWindow();
+            }
         }
 
         public Task StopAsync(CancellationToken cancellationToken)
         {
-            _logger.LogDebug("🛑 Остановка TrayService...");
+            _logger.LogDebug("🛑 TrayService.StopAsync: остановка...");
             Dispose();
             return Task.CompletedTask;
         }
 
         public void ShowMainWindow()
         {
-            if (_mainWindow == null) return;
+            var window = GetMainWindow();
 
-            Application.Current.Dispatcher.Invoke(() =>
+            if (window == null)
             {
-                _mainWindow.Show();
-                _mainWindow.WindowState = WindowState.Normal;
-                _mainWindow.Activate();
-                _mainWindow.Focus();
-            });
+                _logger.LogWarning("⚠️ ShowMainWindow: _mainWindow = null");
+                return;
+            }
+
+            _logger.LogDebug($"🪟 ShowMainWindow: показываем окно (HashCode: {window.GetHashCode()})");
+
+            try
+            {
+                if (Application.Current?.Dispatcher != null)
+                {
+                    Application.Current.Dispatcher.Invoke(() =>
+                    {
+                        window.Show();
+                        window.WindowState = WindowState.Normal;
+                        window.Activate();
+                        window.Focus();
+                    });
+                }
+                else
+                {
+                    // Fallback: показываем напрямую, если диспетчер недоступен
+                    window.Show();
+                    window.WindowState = WindowState.Normal;
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "❌ Ошибка при показе окна");
+            }
         }
 
         public void HideMainWindow()
         {
-            if (_mainWindow == null) return;
+            var window = GetMainWindow();
+            if (window == null) return;
 
-            Application.Current.Dispatcher.Invoke(() =>
-            {
-                _mainWindow.Hide();
-            });
+            Application.Current?.Dispatcher.Invoke(() => window.Hide());
         }
 
         public void ToggleMainWindow()
         {
-            if (_mainWindow?.IsVisible == true)
-                HideMainWindow();
-            else
-                ShowMainWindow();
+            var window = GetMainWindow();
+            if (window == null)
+            {
+                _logger.LogWarning("⚠️ ToggleMainWindow: окно не назначено");
+                return;
+            }
+
+            bool isVisible = false;
+            Application.Current?.Dispatcher.Invoke(() => isVisible = window.IsVisible);
+
+            _logger.LogDebug($"🔄 ToggleMainWindow: isVisible = {isVisible}");
+
+            if (isVisible) HideMainWindow();
+            else ShowMainWindow();
+        }
+
+        private MainWindow? GetMainWindow()
+        {
+            lock (_lock)
+            {
+                if (_mainWindow == null)
+                    _logger.LogDebug("🔍 GetMainWindow: _mainWindow = null");
+                return _mainWindow;
+            }
         }
 
         private ContextMenuStrip CreateContextMenu()
         {
             var menu = new ContextMenuStrip();
 
-            var toggleItem = new ToolStripMenuItem("Показать окно");
-            toggleItem.Click += (s, e) => ToggleMainWindow();
-            menu.Items.Add(toggleItem);
+            // Пока не нужны, м.б. потом добавлю
+            //var toggleItem = new ToolStripMenuItem("Показать окно");
+            //toggleItem.Click += (s, e) => ToggleMainWindow();
+            //menu.Items.Add(toggleItem);
 
-            var settingsItem = new ToolStripMenuItem("Настройки...")
-            {
-                Enabled = false // 👈 Включим позже
-            };
-            menu.Items.Add(settingsItem);
+            //var settingsItem = new ToolStripMenuItem("Настройки...") { Enabled = false };
+            //menu.Items.Add(settingsItem);
 
             menu.Items.Add(new ToolStripSeparator());
 
@@ -123,8 +208,15 @@ namespace DebugInterceptor.Services
             exitItem.Click += async (s, e) =>
             {
                 _logger.LogInformation("👋 Завершение работы из трея");
-                await Application.Current.Dispatcher.InvokeAsync(() =>
-                    Application.Current.Shutdown(0));
+                if (Application.Current != null)
+                {
+                    await Application.Current.Dispatcher.InvokeAsync(() =>
+                        Application.Current.Shutdown(0));
+                }
+                else
+                {
+                    Environment.Exit(0);
+                }
             };
             menu.Items.Add(exitItem);
 
@@ -135,8 +227,11 @@ namespace DebugInterceptor.Services
         {
             if (_isDisposed) return;
 
+            _logger.LogDebug("🧹 TrayService.Dispose: очистка...");
+
             if (_notifyIcon != null)
             {
+                _notifyIcon.MouseDoubleClick -= OnNotifyIconMouseDoubleClick;
                 _notifyIcon.Visible = false;
                 _notifyIcon.Icon?.Dispose();
                 _notifyIcon.Dispose();

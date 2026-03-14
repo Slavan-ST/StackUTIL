@@ -1,5 +1,7 @@
 ﻿// MainWindow.xaml.cs
-using System.Windows; // 👈 Явное пространство для WPF
+using System.Windows;
+using System.ComponentModel;
+using DebugInterceptor.Services; // 👈 Добавляем пространство
 
 namespace StackUTIL
 {
@@ -8,23 +10,14 @@ namespace StackUTIL
         public MainWindow()
         {
             InitializeComponent();
-
-            // 👇 Не показывать окно в панели задач при старте
             this.ShowInTaskbar = false;
-            this.WindowState = WindowState.Minimized;
-            this.Visibility = Visibility.Hidden;
         }
 
-        /// <summary>
-        /// Обработчик закрытия окна — скрываем в трей вместо завершения приложения
-        /// </summary>
-        protected override void OnClosed(EventArgs e)
+        protected override void OnClosing(CancelEventArgs e)
         {
-            // 👈 Если хотите, чтобы кнопка "Закрыть" тоже сворачивала в трей:
-            // e.Cancel = true;
-            // this.Hide();
-
-            base.OnClosed(e);
+            e.Cancel = true;
+            this.Hide();
+            base.OnClosing(e);
         }
     }
 }

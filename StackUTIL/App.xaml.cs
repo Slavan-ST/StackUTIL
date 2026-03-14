@@ -1,5 +1,4 @@
-﻿// App.xaml.cs
-using DebugInterceptor.Services;
+﻿using DebugInterceptor.Services;
 using DebugInterceptor.ViewModels;
 using DebugInterceptor.Views;
 using Microsoft.Extensions.DependencyInjection;
@@ -7,9 +6,6 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using System.Windows;
 using DebugInterceptor.Models;
-using System;
-using System.Linq;
-using System.Collections.Generic;
 
 namespace StackUTIL
 {
@@ -17,7 +13,7 @@ namespace StackUTIL
     {
         private IHost _host;
         private ILogger<App> _logger;
-        private MainWindow? _mainWindow; // 👈 Храним ссылку на главное окно
+        private MainWindow? _mainWindow;
 
         public App()
         {
@@ -48,23 +44,13 @@ namespace StackUTIL
                     services.AddTransient<DebugResultWindow>();
                     services.AddTransient<DebugResultViewModel>();
 
-                    // 👇 Регистрация фабрики MainWindow для TrayService
-                    services.AddTransient<MainWindow>();
-                    services.AddTransient<Func<MainWindow>>(sp =>
-                        () => sp.GetRequiredService<MainWindow>());
-
                     // ==========================================
                     // 📡 TrayService (фоновый сервис)
                     // ==========================================
-                    services.AddHostedService<TrayService>();
-
-                    // ==========================================
-                    // ⚙️ Настройки: SettingsManager<T>
-                    // ==========================================
-                    services.AddSingleton<SettingsManager<AppSettings>>(sp =>
-                        new SettingsManager<AppSettings>(
-                            "appsettings.json",
-                            sp.GetRequiredService<ILogger<SettingsManager<AppSettings>>>()));
+                    // 1. Регистрируем как Singleton — для ручного получения
+                    services.AddSingleton<TrayService>();
+                    // 2. Регистрируем как IHostedService — для автозапуска
+                    services.AddHostedService(sp => sp.GetRequiredService<TrayService>());
                 })
                 .Build();
 
@@ -74,7 +60,7 @@ namespace StackUTIL
 
         protected override async void OnStartup(StartupEventArgs e)
         {
-            _logger.LogInformation("🚀 App.OnStartup: начало запуска");
+            _logger.LogInformation("🚀 App.OnStartup: начало");
 
             try
             {
@@ -90,41 +76,32 @@ namespace StackUTIL
                 return;
             }
 
-            // 👇 Создаём и показываем главное окно (как раньше)
+            // 👇 1. Получаем TrayService из контейнера (теперь работает!)
+            var trayService = _host.Services.GetRequiredService<TrayService>();
+            _logger.LogDebug($"🔍 TrayService из контейнера: {trayService.GetHashCode()}");
+
+            // 👇 2. Создаём окно и передаём ему ссылку на сервис
             _mainWindow = new MainWindow();
-            _logger.LogTrace("🪟 MainWindow создан");
+            trayService?.SetMainWindow(_mainWindow);
+            _logger.LogTrace($"🪟 MainWindow создан (HashCode: {_mainWindow.GetHashCode()})");
 
-            // Инициализация горячих клавиш после появления хэндла
-            _mainWindow.Loaded += (s, args) =>
-            {
-                _logger.LogTrace("🪟 MainWindow.Loaded: инициализация хоткеев");
-                InitializeHotkeysSafely(_mainWindow);
 
-                // 👇 После инициализации передаём окно в TrayService для управления
-                var trayService = _host.Services.GetService<TrayService>();
-                trayService?.SetMainWindow(_mainWindow);
-            };
+            _logger.LogTrace("🪟 MainWindow.Loaded: инициализация хоткеев");
+            InitializeHotkeysSafely(_mainWindow);
 
-            _mainWindow.Show();
-            _logger.LogInformation("🪟 MainWindow показан");
             base.OnStartup(e);
         }
 
-        /// <summary>
-        /// Безопасная инициализация горячих клавиш
-        /// </summary>
         private void InitializeHotkeysSafely(Window mainWindow)
         {
             try
             {
                 var interceptService = _host.Services.GetService<DebugInterceptService>();
-
                 if (interceptService == null)
                 {
                     _logger.LogWarning("⚠️ interceptService не найден");
                     return;
                 }
-
                 interceptService.InitializeHotkeys(mainWindow);
                 _logger.LogInformation("🎉 Горячие клавиши инициализированы");
             }
@@ -138,23 +115,10 @@ namespace StackUTIL
 
         protected override async void OnExit(ExitEventArgs e)
         {
-            _logger.LogInformation("🛑 App.OnExit: завершение работы");
-
-            try
-            {
-                await _host.StopAsync();
-                _logger.LogInformation("✅ Хост остановлен");
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "⚠ Ошибка остановки хоста");
-            }
-            finally
-            {
-                _host?.Dispose();
-                _logger.LogDebug("✅ Ресурсы освобождены");
-            }
-
+            _logger.LogInformation("🛑 App.OnExit: завершение");
+            try { await _host.StopAsync(); }
+            catch (Exception ex) { _logger.LogWarning(ex, "⚠ Ошибка остановки"); }
+            finally { _host?.Dispose(); }
             base.OnExit(e);
         }
     }

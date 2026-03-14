@@ -49,10 +49,6 @@
                     Command="{Binding CopySelectedQueryCommand}"
                     Margin="0,0,8,0" Width="130"
                     ToolTip="Копировать запрос выбранной записи в буфер обмена"/>
-
-            <Button Content="🔄 Обновить" 
-                    Margin="0,0,8,0" Width="100"
-                    ToolTip="Повторить перехват (для тестов)"/>
         </StackPanel>
 
         <!-- Кнопка закрытия -->

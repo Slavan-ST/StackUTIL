@@ -1,11 +1,8 @@
-﻿// ViewModels/DebugResultViewModel.cs
-using CommunityToolkit.Mvvm.ComponentModel;
+﻿using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using DebugInterceptor.Models;
-using DebugInterceptor.Services;
 using DebugInterceptor.Views;
 using System.Collections.ObjectModel;
-using System.Windows;
 
 namespace DebugInterceptor.ViewModels
 {
@@ -20,16 +17,12 @@ namespace DebugInterceptor.ViewModels
         [ObservableProperty]
         private string _statusMessage = string.Empty;
 
-        private readonly SettingsManager<AppSettings>? _settingsManager;
 
         public IRelayCommand CopySelectedQueryCommand { get; }
         public IRelayCommand CloseCommand { get; }
 
-        public DebugResultViewModel(
-            SettingsManager<AppSettings>? settingsManager = null)
+        public DebugResultViewModel()
         {
-            _settingsManager = settingsManager;
-
             CopySelectedQueryCommand = new RelayCommand(CopySelectedQuery, () => SelectedRecord != null);
             CloseCommand = new RelayCommand(() =>
                 System.Windows.Application.Current.Windows
