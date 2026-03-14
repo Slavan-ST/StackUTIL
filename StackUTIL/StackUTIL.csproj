@@ -11,6 +11,9 @@
 		<InterceptorsNamespaces>$(InterceptorsNamespaces);Microsoft.Extensions.Configuration.Binder.SourceGeneration</InterceptorsNamespaces>
 		<EmitCompilerGeneratedFiles>true</EmitCompilerGeneratedFiles>
 		<SelfContained>false</SelfContained>
+		<AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+		<Optimize>true</Optimize>
+		<TieredCompilation>false</TieredCompilation>
 	</PropertyGroup>
 
 	<ItemGroup>
@@ -33,15 +36,13 @@
 
 	<ItemGroup>
 		<!-- appsettings.json: копируется и публикуется отдельно -->
-		<None Update="appsettings.json">
+		<Content Include="appsettings.json">
 			<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-			<ExcludeFromSingleFile>false</ExcludeFromSingleFile>
-		</None>
+		</Content>
 
 		<!-- tessdata: папка с данными для Tesseract -->
 		<Content Include="tessdata\**">
 			<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-			<ExcludeFromSingleFile>false</ExcludeFromSingleFile>
 		</Content>
 	</ItemGroup>
 

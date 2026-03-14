@@ -3,6 +3,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using StackUTIL.Services;
+using System.Diagnostics;
 using System.IO;
 using System.Windows;
 
@@ -44,6 +45,7 @@ namespace StackUTIL
 
         protected override async void OnStartup(StartupEventArgs e)
         {
+
             try
             {
                 await _host.StartAsync();
@@ -65,6 +67,7 @@ namespace StackUTIL
             InitializeHotkeysSafely(_mainWindow);
             base.OnStartup(e);
         }
+
 
         private void InitializeHotkeysSafely(Window mainWindow)
         {
@@ -89,5 +92,8 @@ namespace StackUTIL
             finally { _host?.Dispose(); }
             base.OnExit(e);
         }
+
+
+
     }
 }

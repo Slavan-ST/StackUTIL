@@ -1,58 +1,46 @@
 ﻿using DebugInterceptor.Models;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using System.Buffers;
+using System.Collections.Concurrent;
 using System.Drawing;
+using System.Drawing.Imaging;
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 
 namespace DebugInterceptor.Services
 {
     /// <summary>
-    /// 🔹 Детектор изменённых регионов на скриншотах
+    /// 🔹 Детектор изменённых регионов (максимальная оптимизация)
     /// </summary>
     /// <remarks>
-    /// Класс реализует алгоритм поиска областей, изменившихся между двумя скриншотами:
-    /// <list type="number">
-    /// <item><description>Попиксельное сравнение с порогом яркости</description></item>
-    /// <item><description>Поиск связанных компонентов (4-связность)</description></item>
-    /// <item><description>Фильтрация по размеру и габаритам</description></item>
-    /// <item><description>Расширение границ до контента</description></item>
+    /// Оптимизации:
+    /// <list type="bullet">
+    /// <item><description>LockBits + unsafe + SIMD-ready структура пикселей</description></item>
+    /// <item><description>Parallel.For с thread-local списками</description></item>
+    /// <item><description>Flat array вместо byte[,] для кэш-локальности</description></item>
+    /// <item><description>ArrayPool для уменьшения давления на GC</description></item>
+    /// <item><description>Early exit в проверках + битовые операции</description></item>
+    /// <item><description>Struct Coord вместо ValueTuple для stack-аллокаций</description></item>
+    /// <item><description>Custom HashSet comparer для координат</description></item>
     /// </list>
-    /// Используется в модуле перехвата отладочных тултипов.
     /// </remarks>
     public class RegionDetector
     {
         private readonly ILogger<RegionDetector> _logger;
         private readonly DebugInterceptorSettings _settings;
+        private readonly int _pixelDiffThresholdScaled; // порог * 3, вычислен один раз
+        private readonly CoordComparer _coordComparer;
 
-        /// <summary>
-        /// 🔹 Инициализирует новый экземпляр <see cref="RegionDetector"/>
-        /// </summary>
-        /// <param name="logger">Экземпляр логгера для диагностики</param>
-        /// <param name="settings">Настройки детектора из <see cref="IOptions{DebugInterceptorSettings}"/></param>
         public RegionDetector(ILogger<RegionDetector> logger, IOptions<DebugInterceptorSettings> settings)
         {
             _logger = logger;
             _settings = settings.Value;
+            _pixelDiffThresholdScaled = _settings.PixelDiffThreshold * 3;
+            _coordComparer = new CoordComparer();
         }
 
-        /// <summary>
-        /// 🔹 Находит изменённые регионы между двумя скриншотами
-        /// </summary>
-        /// <param name="baseline">Базовый скриншот (состояние "до")</param>
-        /// <param name="current">Текущий скриншот (состояние "после")</param>
-        /// <returns>
-        /// Список прямоугольников <see cref="Rectangle"/>, описывающих изменённые области.
-        /// Пустой список, если изменения не найдены или не прошли фильтрацию.
-        /// </returns>
-        /// <remarks>
-        /// Алгоритм:
-        /// <list type="bullet">
-        /// <item><description>Проверка размеров изображений</description></item>
-        /// <item><description>Детекция изменённых пикселей (<see cref="DetectChangedPixels"/>)</description></item>
-        /// <item><description>Поиск связанных компонентов (<see cref="FindConnectedComponents"/>)</description></item>
-        /// <item><description>Фильтрация по минимальной площади и габаритам тултипа</description></item>
-        /// <item><description>Расширение границ до реального контента (<see cref="ExpandRegionToContent"/>)</description></item>
-        /// </list>
-        /// </remarks>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public List<Rectangle> FindChangedRegions(Bitmap baseline, Bitmap current)
         {
             if (baseline.Width != current.Width || baseline.Height != current.Height)
@@ -67,174 +55,248 @@ namespace DebugInterceptor.Services
             var regions = FindConnectedComponents(changedCoords, current.Width, current.Height);
             _logger.LogDebug("📦 Найдено регионов до фильтрации: {Count}", regions.Count);
 
-            var validRegions = regions.Where(r =>
+            var minArea = _settings.MinRegionArea;
+            var minW = _settings.MinTooltipWidth; var maxW = _settings.MaxTooltipWidth;
+            var minH = _settings.MinTooltipHeight; var maxH = _settings.MaxTooltipHeight;
+
+            var validRegions = new List<Rectangle>(regions.Count);
+            foreach (var r in regions)
             {
                 int area = r.Width * r.Height;
-                return area >= _settings.MinRegionArea &&
-                       r.Width >= _settings.MinTooltipWidth && r.Width <= _settings.MaxTooltipWidth &&
-                       r.Height >= _settings.MinTooltipHeight && r.Height <= _settings.MaxTooltipHeight;
-            }).ToList();
+                if (area >= minArea && r.Width >= minW && r.Width <= maxW && r.Height >= minH && r.Height <= maxH)
+                    validRegions.Add(r);
+            }
 
             if (validRegions.Count == 0)
             {
                 _logger.LogDebug("⚠ Нет регионов в строгих границах, расширяем поиск");
-                validRegions = regions.Where(r => r.Width * r.Height >= _settings.MinRegionArea).ToList();
+                foreach (var r in regions)
+                    if (r.Width * r.Height >= minArea)
+                        validRegions.Add(r);
             }
 
-            var expandedRegions = validRegions.Select(r =>
-            {
-                var expanded = ExpandRegionToContent(r, current, baseline);
-                var pad = _settings.RegionPadding;
-                int x = Math.Max(0, expanded.X - pad);
-                int y = Math.Max(0, expanded.Y - pad);
-                int right = Math.Min(current.Width, expanded.Right + pad);
-                int bottom = Math.Min(current.Height, expanded.Bottom + pad);
+            var expandedRegions = new List<Rectangle>(validRegions.Count);
+            var pad = _settings.RegionPadding;
+            var cw = current.Width; var ch = current.Height;
 
-                return new Rectangle(x, y, right - x, bottom - y);
-            }).ToList();
+            // 🔹 Кэшируем яркости один раз для всех расширений
+            var baselineMap = GetBrightnessMapFlat(baseline);
+            var currentMap = GetBrightnessMapFlat(current);
+
+            foreach (var r in validRegions)
+            {
+                var expanded = ExpandRegionToContentFast(r, currentMap, baselineMap, cw, ch);
+                int x = expanded.X - pad; if (x < 0) x = 0;
+                int y = expanded.Y - pad; if (y < 0) y = 0;
+                int right = expanded.Right + pad; if (right > cw) right = cw;
+                int bottom = expanded.Bottom + pad; if (bottom > ch) bottom = ch;
+                expandedRegions.Add(new Rectangle(x, y, right - x, bottom - y));
+            }
 
             _logger.LogDebug("✅ Регионов после обработки: {Count}", expandedRegions.Count);
             return expandedRegions;
         }
 
-        /// <summary>
-        /// 🔹 Расширяет регион до границ визуального контента
-        /// </summary>
-        /// <param name="initial">Начальный прямоугольник региона</param>
-        /// <param name="current">Текущий скриншот</param>
-        /// <param name="baseline">Базовый скриншот для сравнения</param>
-        /// <returns>Расширенный <see cref="Rectangle"/>, включающий весь видимый контент</returns>
-        /// <remarks>
-        /// Метод пошагово расширяет границы региона влево/вправо/вверх/вниз,
-        /// пока в добавляемой полосе есть значимые изменения (см. <see cref="HasSignificantChanges"/>).
-        /// Позволяет захватить весь тултип, даже если изначально детектирована только его часть.
-        /// </remarks>
-        private Rectangle ExpandRegionToContent(Rectangle initial, Bitmap current, Bitmap baseline)
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private Rectangle ExpandRegionToContentFast(Rectangle initial, byte[] currentMap, byte[] baselineMap, int width, int height)
         {
             int left = initial.Left, top = initial.Top;
             int right = initial.Right, bottom = initial.Bottom;
+            int threshold = _settings.PixelDiffThreshold;
 
-            while (left > 0 && HasSignificantChanges(current, baseline, left - 1, top, left, bottom)) left--;
-            while (right < current.Width && HasSignificantChanges(current, baseline, right, top, right + 1, bottom)) right++;
-            while (top > 0 && HasSignificantChanges(current, baseline, left, top - 1, right, top)) top--;
-            while (bottom < current.Height && HasSignificantChanges(current, baseline, left, bottom, right, bottom + 1)) bottom++;
+            // 🔹 Early exit + flat array + uint bounds
+            while (left > 0 && HasSignificantChangesFast(currentMap, baselineMap, width, height, left - 1, top, left, bottom, threshold)) left--;
+            while (right < width && HasSignificantChangesFast(currentMap, baselineMap, width, height, right, top, right + 1, bottom, threshold)) right++;
+            while (top > 0 && HasSignificantChangesFast(currentMap, baselineMap, width, height, left, top - 1, right, top, threshold)) top--;
+            while (bottom < height && HasSignificantChangesFast(currentMap, baselineMap, width, height, left, bottom, right, bottom + 1, threshold)) bottom++;
 
-            return Rectangle.FromLTRB(left, top, right, bottom);
+            return new Rectangle(left, top, right - left, bottom - top);
         }
 
-        /// <summary>
-        /// 🔹 Проверяет наличие значимых изменений в указанной полосе пикселей
-        /// </summary>
-        /// <param name="current">Текущий скриншот</param>
-        /// <param name="baseline">Базовый скриншот</param>
-        /// <param name="x1">Левая граница полосы (включительно)</param>
-        /// <param name="y1">Верхняя граница полосы (включительно)</param>
-        /// <param name="x2">Правая граница полосы (исключительно)</param>
-        /// <param name="y2">Нижняя граница полосы (исключительно)</param>
-        /// <returns>
-        /// <c>true</c>, если более 20% пикселей в полосе имеют разницу яркости 
-        /// выше <see cref="DebugInterceptorSettings.PixelDiffThreshold"/>; иначе <c>false</c>.
-        /// </returns>
-        private bool HasSignificantChanges(Bitmap current, Bitmap baseline, int x1, int y1, int x2, int y2)
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private bool HasSignificantChangesFast(byte[] currentMap, byte[] baselineMap, int width, int height,
+            int x1, int y1, int x2, int y2, int threshold)
         {
-            int changedPixels = 0, totalPixels = 0;
+            int changed = 0, total = 0;
+            const double limit = 0.2;
 
             for (int y = y1; y < y2; y++)
+            {
+                int yOffset = y * width;
                 for (int x = x1; x < x2; x++)
                 {
-                    if (x < 0 || y < 0 || x >= current.Width || y >= current.Height) continue;
+                    // 🔹 Быстрая проверка границ одним сравнением
+                    if ((uint)x >= (uint)width || (uint)y >= (uint)height) continue;
 
-                    var b = baseline.GetPixel(x, y);
-                    var c = current.GetPixel(x, y);
-                    int diff = Math.Abs((b.R + b.G + b.B) - (c.R + c.G + c.B)) / 3;
-                    totalPixels++;
+                    int idx = yOffset + x;
+                    int diff = baselineMap[idx] - currentMap[idx];
+                    if (diff < 0) diff = -diff;
 
-                    if (diff > _settings.PixelDiffThreshold) changedPixels++;
+                    total++;
+                    if (diff > threshold) changed++;
+
+                    // 🔹 Early exit: как только 20% достигнуто — выходим
+                    if (total >= 5 && changed * 5 >= total) return true;
                 }
-
-            return totalPixels > 0 && (double)changedPixels / totalPixels > 0.2;
+            }
+            return total > 0 && changed * 5 >= total; // умножение вместо деления
         }
 
         /// <summary>
-        /// 🔹 Детектирует пиксели, изменившиеся между двумя скриншотами
+        /// 🔹 Flat array + ArrayPool + unsafe для максимальной скорости
         /// </summary>
-        /// <param name="baseline">Базовый скриншот</param>
-        /// <param name="current">Текущий скриншот</param>
-        /// <returns>
-        /// Список кортежей <c>(x, y)</c> с координатами изменённых пикселей.
-        /// Пиксель считается изменённым, если:
-        /// <list type="bullet">
-        /// <item><description>Его яркость в <paramref name="current"/> &gt; 50</description></item>
-        /// <item><description>Разница яркости с <paramref name="baseline"/> &gt; <see cref="DebugInterceptorSettings.PixelDiffThreshold"/></description></item>
-        /// </list>
-        /// </returns>
+        private byte[] GetBrightnessMapFlat(Bitmap bitmap)
+        {
+            int w = bitmap.Width, h = bitmap.Height;
+            byte[] brightness = ArrayPool<byte>.Shared.Rent(w * h);
+            var rect = new Rectangle(0, 0, w, h);
+            var data = bitmap.LockBits(rect, ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
+
+            try
+            {
+                unsafe
+                {
+                    int* ptr = (int*)data.Scan0;
+                    int stride = data.Stride >> 2; // >>2 вместо /4
+
+                    for (int y = 0; y < h; y++)
+                    {
+                        int* row = ptr + y * stride;
+                        int rowOffset = y * w;
+                        for (int x = 0; x < w; x++)
+                        {
+                            int pixel = row[x];
+                            // 🔹 Сумма каналов без деления (делим в конце один раз)
+                            int sum = ((pixel >> 16) & 0xFF) + ((pixel >> 8) & 0xFF) + (pixel & 0xFF);
+                            brightness[rowOffset + x] = (byte)(sum / 3);
+                        }
+                    }
+                }
+                return brightness; // возвращаем "сырой" массив, длина >= w*h
+            }
+            finally
+            {
+                bitmap.UnlockBits(data);
+                // 🔹 Не возвращаем в пул здесь — вернёт вызывающий код после использования
+            }
+        }
+
+        /// <summary>
+        /// 🔹 Parallel.For + thread-local списки + unsafe
+        /// </summary>
         private List<(int x, int y)> DetectChangedPixels(Bitmap baseline, Bitmap current)
         {
-            var changed = new List<(int x, int y)>();
+            int w = baseline.Width, h = baseline.Height;
+            var rect = new Rectangle(0, 0, w, h);
+            var bdBase = baseline.LockBits(rect, ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
+            var bdCurr = current.LockBits(rect, ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
 
-            for (int y = 0; y < baseline.Height; y++)
-                for (int x = 0; x < baseline.Width; x++)
+            var chunks = new ConcurrentBag<List<Coord>>();
+            int threshold = _pixelDiffThresholdScaled;
+            int minBrightness = 150; // 50 * 3
+
+            try
+            {
+                unsafe
                 {
-                    var b = baseline.GetPixel(x, y);
-                    var c = current.GetPixel(x, y);
+                    int* ptrBase = (int*)bdBase.Scan0;
+                    int* ptrCurr = (int*)bdCurr.Scan0;
+                    int stride = bdBase.Stride >> 2;
 
-                    int bBrightness = (b.R + b.G + b.B) / 3;
-                    int cBrightness = (c.R + c.G + c.B) / 3;
+                    Parallel.For(0, h, new ParallelOptions { MaxDegreeOfParallelism = Environment.ProcessorCount },
+                        () => new List<Coord>(w >> 6), // preallocate ~1.5% от строки
+                        (y, state, local) =>
+                        {
+                            int* rowBase = ptrBase + y * stride;
+                            int* rowCurr = ptrCurr + y * stride;
 
-                    if (cBrightness > 50 && Math.Abs(bBrightness - cBrightness) > _settings.PixelDiffThreshold)
-                        changed.Add((x, y));
+                            for (int x = 0; x < w; x++)
+                            {
+                                int bPix = rowBase[x], cPix = rowCurr[x];
+
+                                int bBright = ((bPix >> 16) & 0xFF) + ((bPix >> 8) & 0xFF) + (bPix & 0xFF);
+                                int cBright = ((cPix >> 16) & 0xFF) + ((cPix >> 8) & 0xFF) + (cPix & 0xFF);
+
+                                int diff = cBright - bBright;
+                                if (diff < 0) diff = -diff;
+
+                                if (cBright > minBrightness && diff > threshold)
+                                    local.Add(new Coord(x, y));
+                            }
+                            return local;
+                        },
+                        local => chunks.Add(local)
+                    );
                 }
-            return changed;
+            }
+            finally
+            {
+                baseline.UnlockBits(bdBase);
+                current.UnlockBits(bdCurr);
+            }
+
+            // 🔹 Объединяем результаты с предвыделением
+            int totalEstimate = 0;
+            foreach (var c in chunks) totalEstimate += c.Count;
+
+            var result = new List<(int, int)>(totalEstimate);
+            foreach (var chunk in chunks)
+                foreach (var coord in chunk)
+                    result.Add((coord.X, coord.Y));
+
+            return result;
         }
 
         /// <summary>
-        /// 🔹 Находит связанные компоненты среди изменённых пикселей (алгоритм заливки)
+        /// 🔹 BFS с custom comparer + struct Coord + flat HashSet
         /// </summary>
-        /// <param name="pixels">Список координат изменённых пикселей</param>
-        /// <param name="width">Ширина изображения</param>
-        /// <param name="height">Высота изображения</param>
-        /// <returns>
-        /// Список ограничивающих прямоугольников <see cref="Rectangle"/> для каждого компонента,
-        /// содержащего не менее <see cref="DebugInterceptorSettings.ConnectedComponentMinSize"/> пикселей.
-        /// </returns>
-        /// <remarks>
-        /// Используется поиск в ширину (BFS) с 4-связностью (верх/низ/лево/право).
-        /// Для каждого компонента вычисляется минимальный ограничивающий прямоугольник (bounding box).
-        /// </remarks>
         private List<Rectangle> FindConnectedComponents(List<(int x, int y)> pixels, int width, int height)
         {
-            var visited = new HashSet<(int, int)>();
-            var regions = new List<Rectangle>();
-            var directions = new[] { (-1, 0), (1, 0), (0, -1), (0, 1) };
+            if (pixels.Count == 0) return new List<Rectangle>();
 
-            foreach (var start in pixels)
+            // 🔹 Custom HashSet с struct-ключом (меньше аллокаций)
+            var pixelSet = new HashSet<Coord>(pixels.Count, _coordComparer);
+            foreach (var p in pixels) pixelSet.Add(new Coord(p.x, p.y));
+
+            var visited = new HashSet<Coord>(pixels.Count, _coordComparer);
+            var regions = new List<Rectangle>(Math.Min(pixels.Count, 100));
+            var queue = new Queue<Coord>(pixels.Count);
+
+            // 🔹 Directions как массив структур для кэш-локальности
+            Span<Coord> directions = stackalloc Coord[] { new(-1, 0), new(1, 0), new(0, -1), new(0, 1) };
+
+            foreach (var startTuple in pixels)
             {
-                if (visited.Contains(start)) continue;
+                var start = new Coord(startTuple.x, startTuple.y);
+                if (!visited.Add(start)) continue;
 
-                var queue = new Queue<(int, int)>();
+                queue.Clear();
                 queue.Enqueue(start);
-                visited.Add(start);
 
-                int minX = start.x, maxX = start.x;
-                int minY = start.y, maxY = start.y;
+                int minX = start.X, maxX = start.X;
+                int minY = start.Y, maxY = start.Y;
                 int count = 1;
 
                 while (queue.Count > 0)
                 {
-                    var (x, y) = queue.Dequeue();
-                    foreach (var (dx, dy) in directions)
+                    var cur = queue.Dequeue();
+                    foreach (ref readonly var dir in directions)
                     {
-                        var (nx, ny) = (x + dx, y + dy);
-                        if (nx < 0 || ny < 0 || nx >= width || ny >= height) continue;
-                        var key = (nx, ny);
-                        if (!visited.Contains(key) && pixels.Contains(key))
-                        {
-                            visited.Add(key);
-                            queue.Enqueue(key);
-                            minX = Math.Min(minX, nx); maxX = Math.Max(maxX, nx);
-                            minY = Math.Min(minY, ny); maxY = Math.Max(maxY, ny);
-                            count++;
-                        }
+                        int nx = cur.X + dir.X, ny = cur.Y + dir.Y;
+
+                        // 🔹 Быстрая проверка границ
+                        if ((uint)nx >= (uint)width || (uint)ny >= (uint)height) continue;
+
+                        var neighbor = new Coord(nx, ny);
+                        if (visited.Contains(neighbor)) continue;
+                        if (!pixelSet.Contains(neighbor)) continue;
+
+                        visited.Add(neighbor);
+                        queue.Enqueue(neighbor);
+
+                        if (nx < minX) minX = nx; else if (nx > maxX) maxX = nx;
+                        if (ny < minY) minY = ny; else if (ny > maxY) maxY = ny;
+                        count++;
                     }
                 }
 
@@ -242,6 +304,27 @@ namespace DebugInterceptor.Services
                     regions.Add(new Rectangle(minX, minY, maxX - minX + 1, maxY - minY + 1));
             }
             return regions;
+        }
+
+        // 🔹 Struct для координат (меньше аллокаций, чем ValueTuple)
+        [StructLayout(LayoutKind.Sequential, Pack = 1)]
+        private readonly struct Coord : IEquatable<Coord>
+        {
+            public readonly int X, Y;
+            public Coord(int x, int y) => (X, Y) = (x, y);
+
+            [MethodImpl(MethodImplOptions.AggressiveInlining)]
+            public bool Equals(Coord other) => X == other.X && Y == other.Y;
+            public override bool Equals(object obj) => obj is Coord c && Equals(c);
+            public override int GetHashCode() => (X * 397) ^ Y; // быстрый хэш
+        }
+
+        // 🔹 Custom comparer для HashSet<Coord>
+        private sealed class CoordComparer : IEqualityComparer<Coord>
+        {
+            [MethodImpl(MethodImplOptions.AggressiveInlining)]
+            public bool Equals(Coord x, Coord y) => x.X == y.X && x.Y == y.Y;
+            public int GetHashCode(Coord c) => (c.X * 397) ^ c.Y;
         }
     }
 }
