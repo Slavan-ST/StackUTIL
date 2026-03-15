@@ -16,3 +16,6 @@
 ## ⚠️ Важно
 - Без `.NET 8` приложение не запустится.
 - На Windows 11 работа не гарантируется.
+
+### Скачать `.NET 8` с оф. сайта
+https://dotnet.microsoft.com/ru-ru/download/dotnet/thank-you/runtime-desktop-8.0.25-windows-x64-installer?cid=getdotnetcore
