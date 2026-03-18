@@ -4,7 +4,13 @@
         Title="🔍 Отладочные записи" 
         Height="500" Width="800"
         WindowStyle="ToolWindow" Topmost="True"
-        ResizeMode="CanResize">
+        ResizeMode="CanResize"
+        FocusManager.FocusedElement="{Binding ElementName=RecordsGrid}">
+    
+    <Window.InputBindings>
+        <KeyBinding Key="Escape" Command="{Binding CloseCommand}"/>
+    </Window.InputBindings>
+    
     <Grid Margin="10">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
