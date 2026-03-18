@@ -3,6 +3,7 @@ using DebugInterceptor.ViewModels;
 using DebugInterceptor.Views;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 using System.Drawing;
 using System.Drawing.Imaging;
 using System.IO;
@@ -21,19 +22,22 @@ namespace DebugInterceptor.Services
         private readonly DebugDataParser _parser;
         private readonly IServiceProvider _serviceProvider;
         private readonly BitmapUtility _bitmapUtility;
+        private readonly IOptions<DebugInterceptorSettings> _settings;
 
         public DebugResultProcessor(
             ILogger<DebugResultProcessor> logger,
             OcrService ocrService,
             DebugDataParser parser,
             IServiceProvider serviceProvider,
-            BitmapUtility bitmapUtility)
+            BitmapUtility bitmapUtility,
+            IOptions<DebugInterceptorSettings> settings)
         {
             _logger = logger;
             _ocrService = ocrService;
             _parser = parser;
             _serviceProvider = serviceProvider;
             _bitmapUtility = bitmapUtility;
+            _settings = settings;
         }
 
         /// <summary>
@@ -41,13 +45,15 @@ namespace DebugInterceptor.Services
         /// </summary>
         public async Task ProcessRegionAsync(Bitmap region, Rectangle regionBounds, Bitmap fullScreenshot)
         {
-            // Сохраняем отладочный скрин
-            var debugPath = Path.Combine(Path.GetTempPath(), $"diff_{DateTime.Now:yyyyMMdd_HHmmss}.png");
-            region.Save(debugPath, ImageFormat.Png);
-            _logger.LogDebug("💾 Diff: {Path}", debugPath);
+            // 🔹 Сохраняем отладочные скриншоты ТОЛЬКО если включено в настройках
+            if (_settings.Value.SaveDebugImages)
+            {
+                var debugPath = Path.Combine(Path.GetTempPath(), $"diff_{DateTime.Now:yyyyMMdd_HHmmss}.png");
+                region.Save(debugPath, ImageFormat.Png);
+                _logger.LogDebug("💾 Diff: {Path}", debugPath);
 
-            // Сохраняем регион с обводкой
-            _bitmapUtility.SaveDebugWithRegion(fullScreenshot, regionBounds, "region_debug");
+                _bitmapUtility.SaveDebugWithRegion(fullScreenshot, regionBounds, "region_debug");
+            }
 
             // OCR + парсинг
             var rawText = _ocrService.Recognize(region);

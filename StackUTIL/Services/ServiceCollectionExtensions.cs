@@ -58,7 +58,8 @@ namespace StackUTIL.Services
                 var ocr = sp.GetRequiredService<OcrService>();
                 var parser = sp.GetRequiredService<DebugDataParser>();
                 var bitmapUtil = sp.GetRequiredService<BitmapUtility>();
-                return new DebugResultProcessor(logger, ocr, parser, sp, bitmapUtil);
+                var settings = sp.GetRequiredService<IOptions<DebugInterceptorSettings>>();
+                return new DebugResultProcessor(logger, ocr, parser, sp, bitmapUtil, settings);
             });
 
             // 🎯 Оркестратор

@@ -1,36 +1,80 @@
-﻿using System.Windows;
+﻿using System;
+using System.Runtime.InteropServices;
+using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
+using System.Windows.Interop;
 using System.Windows.Media;
 
 namespace DebugInterceptor.Views
 {
     public partial class DebugResultWindow : Window
     {
+        // 🔹 WinAPI для принудительного получения фокуса
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool SetForegroundWindow(IntPtr hWnd);
+
+        [DllImport("user32.dll")]
+        private static extern bool AllowSetForegroundWindow(int dwProcessId);
+
         public DebugResultWindow()
         {
             InitializeComponent();
+
+            // 🔹 Подписываемся на события для захвата фокуса
+            SourceInitialized += DebugResultWindow_SourceInitialized;
+            Loaded += DebugResultWindow_Loaded;
         }
+
+        // 🔹 Вызывается когда окно получило HWND (хэндл)
+        private void DebugResultWindow_SourceInitialized(object? sender, EventArgs e)
+        {
+            var hwnd = new WindowInteropHelper(this).Handle;
+            if (hwnd != IntPtr.Zero)
+            {
+                // Разрешаем этому процессу установить фокус (обход блокировки Windows)
+                AllowSetForegroundWindow(Environment.ProcessId);
+                // Пытаемся вывести окно на передний план
+                SetForegroundWindow(hwnd);
+            }
+        }
+
+        // 🔹 Вызывается после полной загрузки визуального дерева
+        private void DebugResultWindow_Loaded(object sender, RoutedEventArgs e)
+        {
+            // Активируем окно (получает фокус ввода)
+            Activate();
+            // Фокусируем само окно
+            Focus();
+            // Передаём фокус на DataGrid для работы клавиатуры (Escape, Ctrl+C и т.д.)
+            RecordsGrid?.Focus();
+        }
+
+        // 🔹 Дополнительная страховка: фокус при каждой активации окна
+        protected override void OnActivated(EventArgs e)
+        {
+            base.OnActivated(e);
+            RecordsGrid?.Focus();
+        }
+
+        // 🔹 Ваш существующий код — без изменений 👇
 
         private void DataGrid_OnPreviewMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
         {
             if (sender is not System.Windows.Controls.DataGrid grid) return;
 
-            // Определяем, по какой ячейке кликнули
             var hit = VisualTreeHelper.HitTest(grid, e.GetPosition(grid));
             if (hit?.VisualHit is DependencyObject dep)
             {
                 var cell = FindParent<System.Windows.Controls.DataGridCell>(dep);
                 if (cell != null && cell.Column != null && cell.DataContext is DebugInterceptor.Models.DebugRecord record)
                 {
-                    // Проверяем модификаторы
                     bool isCtrl = Keyboard.IsKeyDown(Key.LeftCtrl) || Keyboard.IsKeyDown(Key.RightCtrl);
                     bool isShift = Keyboard.IsKeyDown(Key.LeftShift) || Keyboard.IsKeyDown(Key.RightShift);
 
-                    // Если нажат Ctrl или Shift — просто выделяем (стандартное поведение)
                     if (isCtrl || isShift) return;
 
-                    // Одиночный клик — копируем значение ячейки
                     CopyCellValue(cell, record);
                 }
             }
@@ -38,7 +82,6 @@ namespace DebugInterceptor.Views
 
         private void DataGrid_OnSelectedCellsChanged(object sender, SelectedCellsChangedEventArgs e)
         {
-            // Обновляем статус при изменении выделения
             if (DataContext is DebugInterceptor.ViewModels.DebugResultViewModel vm &&
                 sender is System.Windows.Controls.DataGrid grid)
             {
@@ -69,7 +112,8 @@ namespace DebugInterceptor.Views
                     System.Windows.Clipboard.SetText(value);
                     if (DataContext is DebugInterceptor.ViewModels.DebugResultViewModel vm)
                     {
-                        vm.StatusMessage = $"📋 Скопировано: {value?.Substring(0, Math.Min(40, value.Length))}...";
+                        var preview = value?.Substring(0, Math.Min(40, value.Length));
+                        vm.StatusMessage = $"📋 Скопировано: {preview}{(value?.Length > 40 ? "..." : "")}";
                     }
                 }
             }
