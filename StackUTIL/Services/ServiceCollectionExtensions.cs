@@ -51,7 +51,7 @@ namespace StackUTIL.Services
                 return new TooltipValidator(logger, settings);
             });
 
-            // 🧠 Обработчик результата
+
             services.AddSingleton<DebugResultProcessor>(sp =>
             {
                 var logger = sp.GetRequiredService<ILogger<DebugResultProcessor>>();
@@ -62,7 +62,6 @@ namespace StackUTIL.Services
                 return new DebugResultProcessor(logger, ocr, parser, sp, bitmapUtil, settings);
             });
 
-            // 🎯 Оркестратор
             services.AddSingleton<DebugInterceptService>(sp =>
             {
                 return new DebugInterceptService(

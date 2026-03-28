@@ -41,22 +41,13 @@ namespace DebugInterceptor.Services
         }
 
         /// <summary>
-        /// 🔹 Полный пайплайн обработки региона
+        /// 🔹 Полный пайплайн обработки региона (только обрезанный Bitmap)
         /// </summary>
-        public async Task ProcessRegionAsync(Bitmap region, Rectangle regionBounds, Bitmap fullScreenshot)
+        public async Task ProcessRegionAsync(Bitmap croppedRegion)
         {
-            // 🔹 Сохраняем отладочные скриншоты ТОЛЬКО если включено в настройках
-            if (_settings.Value.SaveDebugImages)
-            {
-                var debugPath = Path.Combine(Path.GetTempPath(), $"diff_{DateTime.Now:yyyyMMdd_HHmmss}.png");
-                region.Save(debugPath, ImageFormat.Png);
-                _logger.LogDebug("💾 Diff: {Path}", debugPath);
+            // 🔹 Дебаг уже сохранён в CropChangedRegions, здесь только логика
 
-                _bitmapUtility.SaveDebugWithRegion(fullScreenshot, regionBounds, "region_debug");
-            }
-
-            // OCR + парсинг
-            var rawText = _ocrService.Recognize(region);
+            var rawText = _ocrService.Recognize(croppedRegion);
             _logger.LogDebug("📝 OCR:\n{Text}", rawText?.Trim());
 
             var records = _parser.Parse(rawText);

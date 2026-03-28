@@ -5,185 +5,283 @@ using System.Buffers;
 using System.Collections.Concurrent;
 using System.Drawing;
 using System.Drawing.Imaging;
+using System.IO;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 
 namespace DebugInterceptor.Services
 {
     /// <summary>
-    /// 🔹 Детектор изменённых регионов (максимальная оптимизация)
+    /// 🔹 Детектор изменённых регионов — с фильтрацией выбросов
     /// </summary>
-    /// <remarks>
-    /// Оптимизации:
-    /// <list type="bullet">
-    /// <item><description>LockBits + unsafe + SIMD-ready структура пикселей</description></item>
-    /// <item><description>Parallel.For с thread-local списками</description></item>
-    /// <item><description>Flat array вместо byte[,] для кэш-локальности</description></item>
-    /// <item><description>ArrayPool для уменьшения давления на GC</description></item>
-    /// <item><description>Early exit в проверках + битовые операции</description></item>
-    /// <item><description>Struct Coord вместо ValueTuple для stack-аллокаций</description></item>
-    /// <item><description>Custom HashSet comparer для координат</description></item>
-    /// </list>
-    /// </remarks>
     public class RegionDetector
     {
         private readonly ILogger<RegionDetector> _logger;
         private readonly DebugInterceptorSettings _settings;
-        private readonly int _pixelDiffThresholdScaled; // порог * 3, вычислен один раз
-        private readonly CoordComparer _coordComparer;
+        private readonly int _pixelDiffThresholdScaled;
+        private readonly string _debugOutputPath;
+
+        private readonly int _boundingBoxLowerPercentile;
+        private readonly int _boundingBoxUpperPercentile;
+        private readonly int _densePixelNeighborRadius;
+        private readonly int _densePixelMinNeighbors;
 
         public RegionDetector(ILogger<RegionDetector> logger, IOptions<DebugInterceptorSettings> settings)
         {
             _logger = logger;
             _settings = settings.Value;
             _pixelDiffThresholdScaled = _settings.PixelDiffThreshold * 3;
-            _coordComparer = new CoordComparer();
+            _debugOutputPath = _settings.DebugOutputPath;
+
+            // 🔹 Читаем из конфига
+            _boundingBoxLowerPercentile = _settings.BoundingBoxLowerPercentile;
+            _boundingBoxUpperPercentile = _settings.BoundingBoxUpperPercentile;
+            _densePixelNeighborRadius = _settings.DensePixelNeighborRadius;
+            _densePixelMinNeighbors = _settings.DensePixelMinNeighbors;
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public List<Rectangle> FindChangedRegions(Bitmap baseline, Bitmap current)
+        public List<Rectangle> FindChangedRegions(Bitmap baseline, Bitmap current, bool saveDebug = false)
         {
             if (baseline.Width != current.Width || baseline.Height != current.Height)
                 return new List<Rectangle>();
 
-            var changedCoords = DetectChangedPixels(baseline, current);
-            _logger.LogDebug("🔍 Найдено {Count} изменённых пикселей", changedCoords.Count);
+            var changedPixels = DetectChangedPixels(baseline, current);
+            _logger.LogDebug("🔍 Изменённых пикселей: {Count}", changedPixels.Count);
 
-            if (changedCoords.Count < _settings.MinRegionArea)
-                return new List<Rectangle>();
-
-            var regions = FindConnectedComponents(changedCoords, current.Width, current.Height);
-            _logger.LogDebug("📦 Найдено регионов до фильтрации: {Count}", regions.Count);
-
-            var minArea = _settings.MinRegionArea;
-            var minW = _settings.MinTooltipWidth; var maxW = _settings.MaxTooltipWidth;
-            var minH = _settings.MinTooltipHeight; var maxH = _settings.MaxTooltipHeight;
-
-            var validRegions = new List<Rectangle>(regions.Count);
-            foreach (var r in regions)
+            if (changedPixels.Count < _settings.MinRegionArea)
             {
-                int area = r.Width * r.Height;
-                if (area >= minArea && r.Width >= minW && r.Width <= maxW && r.Height >= minH && r.Height <= maxH)
-                    validRegions.Add(r);
+                SaveChangePixelsDebug(current, changedPixels, [], "no_changes", saveDebug);
+                return [];
             }
 
-            if (validRegions.Count == 0)
+            // 🔹 ФИЛЬТРАЦИЯ: оставляем только пиксели в плотных областях
+            var densePixels = FilterDensePixels(changedPixels, current.Width, current.Height);
+            _logger.LogDebug("🔍 Плотных пикселей: {Count}", densePixels.Count);
+
+            if (densePixels.Count < _settings.MinRegionArea)
             {
-                _logger.LogDebug("⚠ Нет регионов в строгих границах, расширяем поиск");
-                foreach (var r in regions)
-                    if (r.Width * r.Height >= minArea)
-                        validRegions.Add(r);
+                SaveChangePixelsDebug(current, densePixels, [], "too_sparse", saveDebug);
+                return [];
             }
 
-            var expandedRegions = new List<Rectangle>(validRegions.Count);
-            var pad = _settings.RegionPadding;
-            var cw = current.Width; var ch = current.Height;
+            // 🔹 BOUNDING BOX ПО ПРОЦЕНТИЛЯМ (отсекаем выбросы)
+            var (minX, minY, maxX, maxY) = GetPercentileBoundingBox( densePixels,
+                                                                    _boundingBoxLowerPercentile,
+                                                                    _boundingBoxUpperPercentile);
 
-            // 🔹 Кэшируем яркости один раз для всех расширений
-            var baselineMap = GetBrightnessMapFlat(baseline);
-            var currentMap = GetBrightnessMapFlat(current);
+            var boundingBox = new Rectangle(minX, minY, maxX - minX + 1, maxY - minY + 1);
+            _logger.LogDebug("📦 Bounding box (5-95%): {X},{Y} {W}x{H}",
+                minX, minY, boundingBox.Width, boundingBox.Height);
 
-            foreach (var r in validRegions)
+            // 🔹 Проверяем размер
+            if (boundingBox.Width < _settings.MinTooltipWidth ||
+                boundingBox.Height < _settings.MinTooltipHeight)
             {
-                var expanded = ExpandRegionToContentFast(r, currentMap, baselineMap, cw, ch);
-                int x = expanded.X - pad; if (x < 0) x = 0;
-                int y = expanded.Y - pad; if (y < 0) y = 0;
-                int right = expanded.Right + pad; if (right > cw) right = cw;
-                int bottom = expanded.Bottom + pad; if (bottom > ch) bottom = ch;
-                expandedRegions.Add(new Rectangle(x, y, right - x, bottom - y));
-            }
+                // Пробуем с меньшим порогом процентилей
+                var (minX2, minY2, maxX2, maxY2) = GetPercentileBoundingBox(densePixels, 2, 98);
+                boundingBox = new Rectangle(minX2, minY2, maxX2 - minX2 + 1, maxY2 - minY2 + 1);
 
-            _logger.LogDebug("✅ Регионов после обработки: {Count}", expandedRegions.Count);
-            return expandedRegions;
-        }
-
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private Rectangle ExpandRegionToContentFast(Rectangle initial, byte[] currentMap, byte[] baselineMap, int width, int height)
-        {
-            int left = initial.Left, top = initial.Top;
-            int right = initial.Right, bottom = initial.Bottom;
-            int threshold = _settings.PixelDiffThreshold;
-
-            // 🔹 Early exit + flat array + uint bounds
-            while (left > 0 && HasSignificantChangesFast(currentMap, baselineMap, width, height, left - 1, top, left, bottom, threshold)) left--;
-            while (right < width && HasSignificantChangesFast(currentMap, baselineMap, width, height, right, top, right + 1, bottom, threshold)) right++;
-            while (top > 0 && HasSignificantChangesFast(currentMap, baselineMap, width, height, left, top - 1, right, top, threshold)) top--;
-            while (bottom < height && HasSignificantChangesFast(currentMap, baselineMap, width, height, left, bottom, right, bottom + 1, threshold)) bottom++;
-
-            return new Rectangle(left, top, right - left, bottom - top);
-        }
-
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private bool HasSignificantChangesFast(byte[] currentMap, byte[] baselineMap, int width, int height,
-            int x1, int y1, int x2, int y2, int threshold)
-        {
-            int changed = 0, total = 0;
-            const double limit = 0.2;
-
-            for (int y = y1; y < y2; y++)
-            {
-                int yOffset = y * width;
-                for (int x = x1; x < x2; x++)
+                if (boundingBox.Width < _settings.MinTooltipWidth ||
+                    boundingBox.Height < _settings.MinTooltipHeight)
                 {
-                    // 🔹 Быстрая проверка границ одним сравнением
-                    if ((uint)x >= (uint)width || (uint)y >= (uint)height) continue;
-
-                    int idx = yOffset + x;
-                    int diff = baselineMap[idx] - currentMap[idx];
-                    if (diff < 0) diff = -diff;
-
-                    total++;
-                    if (diff > threshold) changed++;
-
-                    // 🔹 Early exit: как только 20% достигнуто — выходим
-                    if (total >= 5 && changed * 5 >= total) return true;
+                    SaveChangePixelsDebug(current, densePixels, [boundingBox], "too_small", saveDebug);
+                    return [];
                 }
             }
-            return total > 0 && changed * 5 >= total; // умножение вместо деления
+
+            if (boundingBox.Width > _settings.MaxTooltipWidth ||
+                boundingBox.Height > _settings.MaxTooltipHeight)
+            {
+                _logger.LogWarning("⚠ Регион слишком большой: {W}x{H}",
+                    boundingBox.Width, boundingBox.Height);
+            }
+
+            // 🔹 Добавляем небольшой паддинг
+            var result = new List<Rectangle>
+            {
+                PadRectangle(boundingBox, 3, current.Width, current.Height)
+            };
+
+            SaveChangePixelsDebug(current, densePixels, result, "final", saveDebug);
+            _logger.LogDebug("✅ Регион: {X},{Y} {W}x{H}",
+                result[0].X, result[0].Y, result[0].Width, result[0].Height);
+
+            return result;
         }
 
         /// <summary>
-        /// 🔹 Flat array + ArrayPool + unsafe для максимальной скорости
+        /// 🔹 Фильтрует пиксели, оставляя только те, что в плотных областях
         /// </summary>
-        private byte[] GetBrightnessMapFlat(Bitmap bitmap)
+        private List<(int x, int y)> FilterDensePixels(List<(int x, int y)> pixels, int width, int height)
         {
-            int w = bitmap.Width, h = bitmap.Height;
-            byte[] brightness = ArrayPool<byte>.Shared.Rent(w * h);
-            var rect = new Rectangle(0, 0, w, h);
-            var data = bitmap.LockBits(rect, ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
+            if (pixels.Count < 10) return pixels;
 
-            try
+            var pixelSet = new HashSet<(int, int)>(pixels);
+            var densePixels = new List<(int x, int y)>(pixels.Count);
+            int neighborRadius = _densePixelNeighborRadius;
+            int minNeighbors = _densePixelMinNeighbors;
+
+            foreach (var (px, py) in pixels)
             {
-                unsafe
-                {
-                    int* ptr = (int*)data.Scan0;
-                    int stride = data.Stride >> 2; // >>2 вместо /4
+                int neighbors = 0;
 
-                    for (int y = 0; y < h; y++)
+                // Считаем соседей в радиусе
+                for (int dy = -neighborRadius; dy <= neighborRadius && neighbors < minNeighbors; dy++)
+                {
+                    for (int dx = -neighborRadius; dx <= neighborRadius; dx++)
                     {
-                        int* row = ptr + y * stride;
-                        int rowOffset = y * w;
-                        for (int x = 0; x < w; x++)
+                        if (dx == 0 && dy == 0) continue;
+
+                        int nx = px + dx, ny = py + dy;
+                        if (nx >= 0 && nx < width && ny >= 0 && ny < height &&
+                            pixelSet.Contains((nx, ny)))
                         {
-                            int pixel = row[x];
-                            // 🔹 Сумма каналов без деления (делим в конце один раз)
-                            int sum = ((pixel >> 16) & 0xFF) + ((pixel >> 8) & 0xFF) + (pixel & 0xFF);
-                            brightness[rowOffset + x] = (byte)(sum / 3);
+                            neighbors++;
                         }
                     }
                 }
-                return brightness; // возвращаем "сырой" массив, длина >= w*h
+
+                // Оставляем только если есть достаточно соседей
+                if (neighbors >= minNeighbors)
+                    densePixels.Add((px, py));
             }
-            finally
-            {
-                bitmap.UnlockBits(data);
-                // 🔹 Не возвращаем в пул здесь — вернёт вызывающий код после использования
-            }
+
+            return densePixels;
         }
 
         /// <summary>
-        /// 🔹 Parallel.For + thread-local списки + unsafe
+        /// 🔹 Вычисляет bounding box по процентилям (отсекает выбросы)
         /// </summary>
+        private (int minX, int minY, int maxX, int maxY) GetPercentileBoundingBox(
+            List<(int x, int y)> pixels, int lowerPercentile, int upperPercentile)
+        {
+            if (pixels.Count == 0)
+                return (0, 0, 0, 0);
+
+            // Сортируем координаты
+            var sortedX = pixels.Select(p => p.x).OrderBy(x => x).ToList();
+            var sortedY = pixels.Select(p => p.y).OrderBy(y => y).ToList();
+
+            // Вычисляем индексы процентилей
+            int lowerIdx = (int)(pixels.Count * lowerPercentile / 100.0);
+            int upperIdx = (int)(pixels.Count * upperPercentile / 100.0) - 1;
+
+            // Ограничиваем индексы
+            lowerIdx = Math.Max(0, Math.Min(lowerIdx, pixels.Count - 1));
+            upperIdx = Math.Max(0, Math.Min(upperIdx, pixels.Count - 1));
+
+            int minX = sortedX[lowerIdx];
+            int maxX = sortedX[upperIdx];
+            int minY = sortedY[lowerIdx];
+            int maxY = sortedY[upperIdx];
+
+            return (minX, minY, maxX, maxY);
+        }
+
+        public List<Bitmap> CropChangedRegions(Bitmap current, List<Rectangle> regions, bool saveDebug = false)
+        {
+            var result = new List<Bitmap>(regions.Count);
+
+            for (int i = 0; i < regions.Count; i++)
+            {
+                var region = regions[i];
+                try
+                {
+                    var cropped = current.Clone(region, current.PixelFormat);
+
+                    if (saveDebug && !string.IsNullOrEmpty(_debugOutputPath))
+                        SaveScreenDebug(cropped, $"region_{i + 1}");
+
+                    result.Add(cropped);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "⚠ Не удалось обрезать регион {Region}", region);
+                }
+            }
+            return result;
+        }
+
+        private void SaveScreenDebug(Bitmap cropped, string suffix)
+        {
+            try
+            {
+                Directory.CreateDirectory(_debugOutputPath);
+                var filename = Path.Combine(_debugOutputPath,
+                    $"debug_screen_{suffix}_{DateTime.Now:yyyyMMdd_HHmmss_fff}.png");
+                cropped.Save(filename, ImageFormat.Png);
+                _logger.LogDebug("💾 Screen debug: {Path}", filename);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "⚠ Ошибка сохранения screen-дебага");
+            }
+        }
+
+        private void SaveChangePixelsDebug(Bitmap current,
+            List<(int x, int y)> changedPixels, List<Rectangle> regions, string stage, bool saveDebug)
+        {
+            if (!saveDebug || string.IsNullOrEmpty(_debugOutputPath)) return;
+
+            try
+            {
+                Directory.CreateDirectory(_debugOutputPath);
+
+                using var debug = new Bitmap(current.Width, current.Height, PixelFormat.Format32bppArgb);
+                using var g = Graphics.FromImage(debug);
+                g.DrawImageUnscaled(current, 0, 0);
+
+                if (changedPixels.Count > 0 && changedPixels.Count < 50000)
+                {
+                    using var pixelBrush = new SolidBrush(Color.FromArgb(120, Color.Red));
+                    foreach (var (x, y) in changedPixels)
+                        g.FillRectangle(pixelBrush, x, y, 1, 1);
+                }
+                else if (changedPixels.Count >= 50000)
+                {
+                    using var denseBrush = new SolidBrush(Color.FromArgb(100, Color.Orange));
+                    for (int i = 0; i < changedPixels.Count; i += 4)
+                    {
+                        var (x, y) = changedPixels[i];
+                        g.FillRectangle(denseBrush, x, y, 2, 2);
+                    }
+                }
+
+                if (regions.Count > 0)
+                {
+                    using var regionPen = new Pen(Color.Lime, 2);
+                    using var font = new Font("Consolas", 8, FontStyle.Bold);
+                    using var textBrush = new SolidBrush(Color.Lime);
+
+                    for (int i = 0; i < regions.Count; i++)
+                    {
+                        var r = regions[i];
+                        g.DrawRectangle(regionPen, r);
+                        g.DrawString($"#{i + 1}", font, textBrush, r.X, r.Y - 14);
+                    }
+                }
+
+                using var legendBg = new SolidBrush(Color.FromArgb(180, 20, 20, 20));
+                g.FillRectangle(legendBg, 8, 8, 220, 50);
+                using var legendPen = new Pen(Color.Gray, 1);
+                g.DrawRectangle(legendPen, 8, 8, 220, 50);
+                using var legendFont = new Font("Consolas", 7);
+                using var whiteBrush = new SolidBrush(Color.White);
+                g.DrawString($"Stage: {stage}", legendFont, whiteBrush, 14, 14);
+                g.DrawString($"Pixels: {changedPixels.Count}, Regions: {regions.Count}", legendFont, whiteBrush, 14, 28);
+
+                var filename = Path.Combine(_debugOutputPath,
+                    $"debug_change_pixels_{stage}_{DateTime.Now:yyyyMMdd_HHmmss_fff}.png");
+                debug.Save(filename, ImageFormat.Png);
+                _logger.LogDebug("💾 Change pixels debug: {Path}", filename);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "⚠ Ошибка сохранения change-pixels дебага");
+            }
+        }
+
         private List<(int x, int y)> DetectChangedPixels(Bitmap baseline, Bitmap current)
         {
             int w = baseline.Width, h = baseline.Height;
@@ -193,7 +291,6 @@ namespace DebugInterceptor.Services
 
             var chunks = new ConcurrentBag<List<Coord>>();
             int threshold = _pixelDiffThresholdScaled;
-            int minBrightness = 150; // 50 * 3
 
             try
             {
@@ -204,7 +301,7 @@ namespace DebugInterceptor.Services
                     int stride = bdBase.Stride >> 2;
 
                     Parallel.For(0, h, new ParallelOptions { MaxDegreeOfParallelism = Environment.ProcessorCount },
-                        () => new List<Coord>(w >> 6), // preallocate ~1.5% от строки
+                        () => new List<Coord>(128),
                         (y, state, local) =>
                         {
                             int* rowBase = ptrBase + y * stride;
@@ -212,21 +309,17 @@ namespace DebugInterceptor.Services
 
                             for (int x = 0; x < w; x++)
                             {
-                                int bPix = rowBase[x], cPix = rowCurr[x];
+                                int b = rowBase[x], c = rowCurr[x];
+                                int bSum = ((b >> 16) & 0xFF) + ((b >> 8) & 0xFF) + (b & 0xFF);
+                                int cSum = ((c >> 16) & 0xFF) + ((c >> 8) & 0xFF) + (c & 0xFF);
+                                int diff = Math.Abs(cSum - bSum);
 
-                                int bBright = ((bPix >> 16) & 0xFF) + ((bPix >> 8) & 0xFF) + (bPix & 0xFF);
-                                int cBright = ((cPix >> 16) & 0xFF) + ((cPix >> 8) & 0xFF) + (cPix & 0xFF);
-
-                                int diff = cBright - bBright;
-                                if (diff < 0) diff = -diff;
-
-                                if (cBright > minBrightness && diff > threshold)
+                                if (diff > (cSum < 180 ? threshold * 2 / 3 : threshold))
                                     local.Add(new Coord(x, y));
                             }
                             return local;
                         },
-                        local => chunks.Add(local)
-                    );
+                        local => chunks.Add(local));
                 }
             }
             finally
@@ -235,11 +328,8 @@ namespace DebugInterceptor.Services
                 current.UnlockBits(bdCurr);
             }
 
-            // 🔹 Объединяем результаты с предвыделением
-            int totalEstimate = 0;
-            foreach (var c in chunks) totalEstimate += c.Count;
-
-            var result = new List<(int, int)>(totalEstimate);
+            int total = chunks.Sum(c => c.Count);
+            var result = new List<(int, int)>(total);
             foreach (var chunk in chunks)
                 foreach (var coord in chunk)
                     result.Add((coord.X, coord.Y));
@@ -247,84 +337,26 @@ namespace DebugInterceptor.Services
             return result;
         }
 
-        /// <summary>
-        /// 🔹 BFS с custom comparer + struct Coord + flat HashSet
-        /// </summary>
-        private List<Rectangle> FindConnectedComponents(List<(int x, int y)> pixels, int width, int height)
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private Rectangle PadRectangle(Rectangle r, int pad, int maxW, int maxH)
         {
-            if (pixels.Count == 0) return new List<Rectangle>();
-
-            // 🔹 Custom HashSet с struct-ключом (меньше аллокаций)
-            var pixelSet = new HashSet<Coord>(pixels.Count, _coordComparer);
-            foreach (var p in pixels) pixelSet.Add(new Coord(p.x, p.y));
-
-            var visited = new HashSet<Coord>(pixels.Count, _coordComparer);
-            var regions = new List<Rectangle>(Math.Min(pixels.Count, 100));
-            var queue = new Queue<Coord>(pixels.Count);
-
-            // 🔹 Directions как массив структур для кэш-локальности
-            Span<Coord> directions = stackalloc Coord[] { new(-1, 0), new(1, 0), new(0, -1), new(0, 1) };
-
-            foreach (var startTuple in pixels)
-            {
-                var start = new Coord(startTuple.x, startTuple.y);
-                if (!visited.Add(start)) continue;
-
-                queue.Clear();
-                queue.Enqueue(start);
-
-                int minX = start.X, maxX = start.X;
-                int minY = start.Y, maxY = start.Y;
-                int count = 1;
-
-                while (queue.Count > 0)
-                {
-                    var cur = queue.Dequeue();
-                    foreach (ref readonly var dir in directions)
-                    {
-                        int nx = cur.X + dir.X, ny = cur.Y + dir.Y;
-
-                        // 🔹 Быстрая проверка границ
-                        if ((uint)nx >= (uint)width || (uint)ny >= (uint)height) continue;
-
-                        var neighbor = new Coord(nx, ny);
-                        if (visited.Contains(neighbor)) continue;
-                        if (!pixelSet.Contains(neighbor)) continue;
-
-                        visited.Add(neighbor);
-                        queue.Enqueue(neighbor);
-
-                        if (nx < minX) minX = nx; else if (nx > maxX) maxX = nx;
-                        if (ny < minY) minY = ny; else if (ny > maxY) maxY = ny;
-                        count++;
-                    }
-                }
-
-                if (count >= _settings.ConnectedComponentMinSize)
-                    regions.Add(new Rectangle(minX, minY, maxX - minX + 1, maxY - minY + 1));
-            }
-            return regions;
+            if (pad <= 0) return r;
+            int x = Math.Max(0, r.X - pad);
+            int y = Math.Max(0, r.Y - pad);
+            int r2 = Math.Min(maxW, r.Right + pad);
+            int b = Math.Min(maxH, r.Bottom + pad);
+            return new Rectangle(x, y, r2 - x, b - y);
         }
 
-        // 🔹 Struct для координат (меньше аллокаций, чем ValueTuple)
         [StructLayout(LayoutKind.Sequential, Pack = 1)]
         private readonly struct Coord : IEquatable<Coord>
         {
             public readonly int X, Y;
             public Coord(int x, int y) => (X, Y) = (x, y);
-
             [MethodImpl(MethodImplOptions.AggressiveInlining)]
-            public bool Equals(Coord other) => X == other.X && Y == other.Y;
-            public override bool Equals(object obj) => obj is Coord c && Equals(c);
-            public override int GetHashCode() => (X * 397) ^ Y; // быстрый хэш
-        }
-
-        // 🔹 Custom comparer для HashSet<Coord>
-        private sealed class CoordComparer : IEqualityComparer<Coord>
-        {
-            [MethodImpl(MethodImplOptions.AggressiveInlining)]
-            public bool Equals(Coord x, Coord y) => x.X == y.X && x.Y == y.Y;
-            public int GetHashCode(Coord c) => (c.X * 397) ^ c.Y;
+            public bool Equals(Coord o) => X == o.X && Y == o.Y;
+            public override bool Equals(object o) => o is Coord c && Equals(c);
+            public override int GetHashCode() => (X * 397) ^ Y;
         }
     }
 }

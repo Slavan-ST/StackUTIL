@@ -151,31 +151,45 @@ namespace DebugInterceptor.Services
 
                 baseline = _captureService.CaptureFullScreen();
                 if (baseline == null) { _notifier.ShowError("Не удалось сделать базовый скриншот"); return; }
-                _logger.LogDebug("📸 Базовый: {W}x{H}", baseline.Width, baseline.Height);
 
-                _logger.LogInformation("⏳ Ожидание {Ms} мс...", _settings.CaptureDelayMs);
                 await Task.Delay(_settings.CaptureDelayMs, token);
 
                 current = _captureService.CaptureFullScreen();
                 if (current == null) { _notifier.ShowError("Не удалось сделать текущий скриншот"); return; }
-                _logger.LogDebug("📸 Текущий: {W}x{H}", current.Width, current.Height);
 
-                var regions = _regionDetector.FindChangedRegions(baseline, current);
-                if (regions.Count == 0) { _notifier.ShowWarning("Не найдено изменений, похожих на тултип.\n\nУбедитесь, что тултип открылся после звукового сигнала.", "Нет изменений"); return; }
+                var regions = _regionDetector.FindChangedRegions(baseline, current, saveDebug: _settings.SaveDebugImages);
+
+                if (regions.Count == 0 && _settings.CaptureDelayMs < 800)
+                {
+                    _logger.LogDebug("🔄 Повторный захват...");
+                    await Task.Delay(150, token);
+                    using var retry = _captureService.CaptureFullScreen();
+                    if (retry != null)
+                        regions = _regionDetector.FindChangedRegions(baseline, retry, saveDebug: _settings.SaveDebugImages);
+                }
+
+                if (regions.Count == 0)
+                {
+                    _notifier.ShowWarning("Изменения не найдены", "Нет данных");
+                    return;
+                }
 
                 _logger.LogInformation("📦 Найдено регионов: {Count}", regions.Count);
 
-                foreach (var region in regions)
+                // 🔹 Обрезаем регионы + сохраняем чистые debug_screen_*.png
+                var croppedRegions = _regionDetector.CropChangedRegions(current, regions, saveDebug: _settings.SaveDebugImages);
+
+                foreach (var cropped in croppedRegions)
                 {
-                    _logger.LogInformation("📐 Регион: {X},{Y} {W}x{H}",
-                        region.X, region.Y, region.Width, region.Height);
-
-                    using var cropped = _bitmapUtility.CropBitmap(current, region);
-
-                    if (!_tooltipValidator.ContainsTooltipHeader(cropped))
-                        _logger.LogWarning("⚠ Заголовок 'Структура записи' не найден, продолжаем...");
-
-                    await _resultProcessor.ProcessRegionAsync(cropped, region, current);
+                    using (cropped)
+                    {
+                        if (!_tooltipValidator.ContainsTooltipHeader(cropped))
+                        {
+                            _logger.LogDebug("⚠ Пропущен регион: не найден заголовок");
+                            continue;
+                        }
+                        await _resultProcessor.ProcessRegionAsync(cropped);
+                    }
                 }
             }
             catch (OperationCanceledException) { _logger.LogDebug("⚠ Отменено"); }

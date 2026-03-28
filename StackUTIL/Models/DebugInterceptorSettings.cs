@@ -32,9 +32,15 @@ namespace DebugInterceptor.Models
         public int MaxTooltipWidth { get; set; } = 900;
         public int MinTooltipHeight { get; set; } = 80;
         public int MaxTooltipHeight { get; set; } = 700;
-        public int ConnectedComponentMinSize { get; set; } = 15;
         public int RegionPadding { get; set; } = 0;
-        public int ExpansionMargin { get; set; } = 10;
+
+        // 🔹 Bounding box percentiles (отсечение выбросов)
+        public int BoundingBoxLowerPercentile { get; set; } = 2;
+        public int BoundingBoxUpperPercentile { get; set; } = 98;
+
+        // 🔹 Dense pixel filtering (фильтрация шума/курсора)
+        public int DensePixelNeighborRadius { get; set; } = 3;
+        public int DensePixelMinNeighbors { get; set; } = 3;
 
         // ═══════════════════════════════════════════════════════
         // OCR
