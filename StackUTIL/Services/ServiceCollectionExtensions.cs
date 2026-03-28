@@ -1,5 +1,8 @@
 ﻿using DebugInterceptor.Models;
+using DebugInterceptor.Models.Enums;
 using DebugInterceptor.Services;
+using DebugInterceptor.Services.Database;
+using DebugInterceptor.Services.Query;
 using DebugInterceptor.ViewModels;
 using DebugInterceptor.Views;
 using Microsoft.Extensions.Configuration;
@@ -7,6 +10,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using StackUTIL.Models.Enums;
+using StackUTIL.Services.Query;
 
 namespace StackUTIL.Services
 {
@@ -77,6 +81,22 @@ namespace StackUTIL.Services
                     sp.GetRequiredService<INotificationService>(),
                     sp.GetRequiredService<IOptions<DebugInterceptorSettings>>()
                 );
+            });
+
+            services.AddSingleton<IQueryGenerator, MsSqlQueryGenerator>();
+
+            // 🔹 Factory для выбора реализации БД (сейчас только MSSQL)
+            services.AddSingleton<IDatabaseService>(sp =>
+            {
+                var settings = sp.GetRequiredService<IOptions<DebugInterceptorSettings>>().Value;
+                var logger = sp.GetRequiredService<ILogger<MsSqlDatabaseService>>();
+
+                return settings.DatabaseType switch
+                {
+                    DatabaseType.MsSql => new MsSqlDatabaseService(logger, Options.Create(settings)),
+                    DatabaseType.PostgreSQL => throw new NotImplementedException("PostgreSQL support coming soon"),
+                    _ => new MsSqlDatabaseService(logger, Options.Create(settings))
+                };
             });
 
             // 🪟 UI

@@ -1,4 +1,5 @@
-﻿using StackUTIL.Models.Enums;
+﻿using DebugInterceptor.Models.Enums;
+using StackUTIL.Models.Enums;
 using System.IO;
 using System.Windows.Input;
 
@@ -58,5 +59,21 @@ namespace DebugInterceptor.Models
         /// 🔹 Режим вывода уведомлений пользователю
         /// </summary>
         public NotificationMode NotificationMode { get; set; } = NotificationMode.MessageBox;
+
+        // ═══════════════════════════════════════════════════════
+        // Database
+        // ═══════════════════════════════════════════════════════
+        /// <summary> Тип базы данных (стратегия) </summary>
+        public DatabaseType DatabaseType { get; set; } = DatabaseType.MsSql;
+
+        /// <summary> Connection string для MSSQL </summary>
+        public string MsSqlConnectionString { get; set; } =
+            "Server=localhost;Database=YourDb;Trusted_Connection=True;TrustServerCertificate=True;";
+
+        /// <summary> Таймаут запросов в секундах </summary>
+        public int QueryTimeoutSeconds { get; set; } = 30;
+
+        /// <summary> Максимальное количество строк для отображения в гриде </summary>
+        public int MaxDisplayRows { get; set; } = 1000;
     }
 }

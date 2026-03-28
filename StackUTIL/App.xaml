@@ -1,7 +1,12 @@
 ﻿<Application x:Class="StackUTIL.App"
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:converters="clr-namespace:DebugInterceptor.Converters"
              xmlns:local="clr-namespace:StackUTIL">
+
     <Application.Resources>
+        <!-- 🔹 Конвертеры -->
+        <converters:InverseBooleanConverter x:Key="InverseBoolConverter"/>
+        <BooleanToVisibilityConverter x:Key="BoolToVisibilityConverter"/>
     </Application.Resources>
 </Application>
