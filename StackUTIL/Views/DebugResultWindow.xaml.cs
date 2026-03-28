@@ -7,14 +7,13 @@ using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Interop;
 using System.Windows.Media;
+using System.Windows.Threading;
 
 namespace DebugInterceptor.Views
 {
     public partial class DebugResultWindow : Window
     {
-
-
-        // 🔹 WinAPI для принудительного получения фокуса
+        // 🔹 WinAPI для работы с фокусом
         [DllImport("user32.dll")]
         [return: MarshalAs(UnmanagedType.Bool)]
         private static extern bool SetForegroundWindow(IntPtr hWnd);
@@ -22,64 +21,161 @@ namespace DebugInterceptor.Views
         [DllImport("user32.dll")]
         private static extern bool AllowSetForegroundWindow(int dwProcessId);
 
+        [DllImport("user32.dll")]
+        private static extern IntPtr GetForegroundWindow();
+
+        [DllImport("user32.dll")]
+        private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
+
+        [DllImport("user32.dll")]
+        private static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
+
+        [DllImport("user32.dll")]
+        private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+
+        [DllImport("user32.dll")]
+        private static extern bool IsWindowVisible(IntPtr hWnd);
+
+        [DllImport("user32.dll")]
+        private static extern bool SetFocus(IntPtr hWnd);
+
+        // 🔹 Kernel32 для получения ID текущего потока
+        [DllImport("kernel32.dll")]
+        private static extern uint GetCurrentThreadId();
+
+        private const int SW_SHOW = 5;
+        private const int SW_RESTORE = 9;
+
+        // 🔹 Поле для сохранения исходного фокуса
+        private IntPtr _originalForegroundWindow;
+
         public DebugResultWindow()
         {
             InitializeComponent();
 
-            // 🔹 Подписываемся на события для захвата фокуса
+            // 🔹 Запоминаем активное окно ДО показа нашего
+            _originalForegroundWindow = GetForegroundWindow();
+
             SourceInitialized += DebugResultWindow_SourceInitialized;
             Loaded += DebugResultWindow_Loaded;
+            Closed += DebugResultWindow_Closed;
         }
 
-        // 🔹 Вызывается когда окно получило HWND (хэндл)
+        private void DebugResultWindow_Closed(object? sender, EventArgs e)
+        {
+            // 🔹 Используем Dispatcher для выполнения после полного закрытия
+            Dispatcher.BeginInvoke(new Action(RestoreFocusToOriginalWindow),
+                DispatcherPriority.ApplicationIdle);
+        }
+
+        /// <summary>
+        /// Восстанавливает фокус на исходное окно
+        /// </summary>
+        private void RestoreFocusToOriginalWindow()
+        {
+            try
+            {
+                if (_originalForegroundWindow != IntPtr.Zero &&
+                    IsWindowVisible(_originalForegroundWindow))
+                {
+                    // 🔹 Восстанавливаем окно если свёрнуто
+                    ShowWindow(_originalForegroundWindow, SW_RESTORE);
+
+                    // 🔹 Получаем ID потоков ПРАВИЛЬНО
+                    uint foreThread = GetWindowThreadProcessId(_originalForegroundWindow, out _);
+                    uint appThread = GetCurrentThreadId(); // ✅ Правильный способ!
+
+                    if (foreThread != 0 && appThread != 0 && foreThread != appThread)
+                    {
+                        AttachThreadInput(appThread, foreThread, true);
+                        SetForegroundWindow(_originalForegroundWindow);
+                        SetFocus(_originalForegroundWindow); // 🔹 Дополнительно ставим фокус ввода
+                        AttachThreadInput(appThread, foreThread, false);
+                    }
+                    else
+                    {
+                        SetForegroundWindow(_originalForegroundWindow);
+                        SetFocus(_originalForegroundWindow);
+                    }
+                }
+            }
+            catch
+            {
+                // Игнорируем
+            }
+        }
+
         private void DebugResultWindow_SourceInitialized(object? sender, EventArgs e)
         {
             var hwnd = new WindowInteropHelper(this).Handle;
             if (hwnd != IntPtr.Zero)
             {
-                // Разрешаем этому процессу установить фокус (обход блокировки Windows)
                 AllowSetForegroundWindow(Environment.ProcessId);
-                // Пытаемся вывести окно на передний план
-                SetForegroundWindow(hwnd);
+                ForceActivateWindow(hwnd);
             }
         }
 
-        // 🔹 Вызывается после полной загрузки визуального дерева
         private void DebugResultWindow_Loaded(object sender, RoutedEventArgs e)
         {
-            // Активируем окно (получает фокус ввода)
+            var hwnd = new WindowInteropHelper(this).Handle;
+            if (hwnd != IntPtr.Zero)
+            {
+                ForceActivateWindow(hwnd);
+            }
+
             Activate();
-            // Фокусируем само окно
             Focus();
-            // Передаём фокус на DataGrid для работы клавиатуры (Escape, Ctrl+C и т.д.)
             RecordsGrid?.Focus();
         }
-        // 🔹 НОВЫЙ обработчик: синхронизация выбранной записи
-        private void DataGrid_OnSelectedCellsChanged(object sender, SelectedCellsChangedEventArgs e)
+
+        private void ForceActivateWindow(IntPtr hwnd)
         {
-            if (sender is not DataGrid grid) return;
-            if (grid.DataContext is not DebugResultViewModel vm) return;
-
-            // Берём первую выделенную ячейку и получаем её данные
-            var firstCell = grid.SelectedCells.FirstOrDefault();
-
-            if (firstCell.Item is DebugRecord record)
+            try
             {
-                vm.SelectedRecord = record;
+                ShowWindow(hwnd, SW_SHOW);
+
+                var foregroundWnd = GetForegroundWindow();
+                if (foregroundWnd == hwnd)
+                    return;
+
+                uint foreThread = GetWindowThreadProcessId(foregroundWnd, out _);
+                uint appThread = GetCurrentThreadId(); // ✅ Исправлено здесь тоже
+
+                if (foreThread != 0 && appThread != 0 && foreThread != appThread)
+                {
+                    AttachThreadInput(appThread, foreThread, true);
+                    SetForegroundWindow(hwnd);
+                    ShowWindow(hwnd, SW_RESTORE);
+                    AttachThreadInput(appThread, foreThread, false);
+                }
+                else
+                {
+                    SetForegroundWindow(hwnd);
+                }
+
+                Activate();
             }
-            else
-            {
-                vm.SelectedRecord = null;
-            }
+            catch { }
         }
-        // 🔹 Дополнительная страховка: фокус при каждой активации окна
+
         protected override void OnActivated(EventArgs e)
         {
             base.OnActivated(e);
             RecordsGrid?.Focus();
         }
 
-        // 🔹 Ваш существующий код — без изменений 👇
+        // 🔹 Остальной код без изменений...
+        private void DataGrid_OnSelectedCellsChanged(object sender, SelectedCellsChangedEventArgs e)
+        {
+            if (sender is not DataGrid grid) return;
+            if (grid.DataContext is not DebugResultViewModel vm) return;
+
+            var firstCell = grid.SelectedCells.FirstOrDefault();
+            if (firstCell.Item != null)
+            {
+                vm.SelectedRecord = firstCell.Item is DebugRecord record ? record : new();
+            }
+        }
 
         private void DataGrid_OnPreviewMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
         {
@@ -134,7 +230,6 @@ namespace DebugInterceptor.Views
             return parent is T t ? t : FindParent<T>(parent);
         }
 
-        // 🔹 Обработчик клика по ячейке результата (копирование одного значения)
         private void ResultDataGrid_OnPreviewMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
         {
             if (sender is not System.Windows.Controls.DataGrid grid) return;
@@ -145,36 +240,27 @@ namespace DebugInterceptor.Views
                 var cell = FindParent<System.Windows.Controls.DataGridCell>(dep);
                 if (cell != null && cell.Column != null)
                 {
-                    // Проверяем модификаторы — если зажаты Ctrl/Shift, не копируем (разрешаем мультиселект)
                     bool isCtrl = Keyboard.IsKeyDown(Key.LeftCtrl) || Keyboard.IsKeyDown(Key.RightCtrl);
                     bool isShift = Keyboard.IsKeyDown(Key.LeftShift) || Keyboard.IsKeyDown(Key.RightShift);
 
                     if (isCtrl || isShift) return;
-
-                    // Копируем значение ячейки
                     CopyResultCellValue(cell);
                 }
             }
         }
 
-        // 🔹 Копирование значения из ячейки результата (DataTable)
-        // 🔹 Копирование значения из ячейки результата (DataTable)
         private void CopyResultCellValue(System.Windows.Controls.DataGridCell cell)
         {
-            // 🔹 1. Получаем данные строки через DataContext (это DataRowView для DataTable)
             if (cell.DataContext is not System.Data.DataRowView rowView)
                 return;
 
-            // 🔹 2. Получаем заголовок колонки (имя поля в DataTable)
             if (cell.Column is not System.Windows.Controls.DataGridTextColumn textColumn)
                 return;
 
-            // Вариант А: через Header (если Header = имя колонки)
             var columnName = textColumn.Header?.ToString();
             if (string.IsNullOrEmpty(columnName))
                 return;
 
-            // 🔹 3. Получаем значение из DataRowView
             var value = rowView[columnName];
             var text = value == null || value == DBNull.Value ? string.Empty : value.ToString();
 
@@ -189,19 +275,16 @@ namespace DebugInterceptor.Views
             }
         }
 
-        // 🔹 Обработчик Ctrl+C для копирования выделенных ячеек
         private void ResultDataGrid_OnKeyDown(object sender, System.Windows.Input.KeyEventArgs e)
         {
             if (e.Key == Key.C && (Keyboard.Modifiers & ModifierKeys.Control) == ModifierKeys.Control)
             {
-                if (sender is DataGrid grid &&
-                    DataContext is DebugResultViewModel vm)
+                if (sender is DataGrid grid && DataContext is DebugResultViewModel vm)
                 {
                     vm.CopySelectedCellsFromGrid(grid);
                     e.Handled = true;
                 }
             }
         }
-
     }
 }
