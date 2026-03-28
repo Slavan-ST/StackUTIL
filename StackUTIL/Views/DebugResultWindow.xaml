@@ -196,10 +196,12 @@
                                     <DataGrid ItemsSource="{Binding Data, Mode=OneWay}" 
                                       AutoGenerateColumns="True"
                                       CanUserAddRows="False" IsReadOnly="True"
+                                      SelectionMode="Extended" SelectionUnit="Cell"
                                       GridLinesVisibility="All"
                                       HeadersVisibility="Column"
                                       RowHeight="22" FontSize="11"
-                                      MinHeight="40"/>
+                                      MinHeight="40"
+                                      KeyDown="ResultDataGrid_OnKeyDown"/>
                                 </ScrollViewer>
 
                                 <!-- Статус -->

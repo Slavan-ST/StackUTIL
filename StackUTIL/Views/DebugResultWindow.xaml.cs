@@ -133,5 +133,75 @@ namespace DebugInterceptor.Views
             if (parent == null) return null;
             return parent is T t ? t : FindParent<T>(parent);
         }
+
+        // 🔹 Обработчик клика по ячейке результата (копирование одного значения)
+        private void ResultDataGrid_OnPreviewMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+        {
+            if (sender is not System.Windows.Controls.DataGrid grid) return;
+
+            var hit = VisualTreeHelper.HitTest(grid, e.GetPosition(grid));
+            if (hit?.VisualHit is DependencyObject dep)
+            {
+                var cell = FindParent<System.Windows.Controls.DataGridCell>(dep);
+                if (cell != null && cell.Column != null)
+                {
+                    // Проверяем модификаторы — если зажаты Ctrl/Shift, не копируем (разрешаем мультиселект)
+                    bool isCtrl = Keyboard.IsKeyDown(Key.LeftCtrl) || Keyboard.IsKeyDown(Key.RightCtrl);
+                    bool isShift = Keyboard.IsKeyDown(Key.LeftShift) || Keyboard.IsKeyDown(Key.RightShift);
+
+                    if (isCtrl || isShift) return;
+
+                    // Копируем значение ячейки
+                    CopyResultCellValue(cell);
+                }
+            }
+        }
+
+        // 🔹 Копирование значения из ячейки результата (DataTable)
+        // 🔹 Копирование значения из ячейки результата (DataTable)
+        private void CopyResultCellValue(System.Windows.Controls.DataGridCell cell)
+        {
+            // 🔹 1. Получаем данные строки через DataContext (это DataRowView для DataTable)
+            if (cell.DataContext is not System.Data.DataRowView rowView)
+                return;
+
+            // 🔹 2. Получаем заголовок колонки (имя поля в DataTable)
+            if (cell.Column is not System.Windows.Controls.DataGridTextColumn textColumn)
+                return;
+
+            // Вариант А: через Header (если Header = имя колонки)
+            var columnName = textColumn.Header?.ToString();
+            if (string.IsNullOrEmpty(columnName))
+                return;
+
+            // 🔹 3. Получаем значение из DataRowView
+            var value = rowView[columnName];
+            var text = value == null || value == DBNull.Value ? string.Empty : value.ToString();
+
+            if (!string.IsNullOrEmpty(text))
+            {
+                System.Windows.Clipboard.SetText(text);
+                if (DataContext is DebugResultViewModel vm)
+                {
+                    var preview = text?.Substring(0, Math.Min(40, text.Length));
+                    vm.StatusMessage = $"📋 Скопировано: {preview}{(text?.Length > 40 ? "..." : "")}";
+                }
+            }
+        }
+
+        // 🔹 Обработчик Ctrl+C для копирования выделенных ячеек
+        private void ResultDataGrid_OnKeyDown(object sender, System.Windows.Input.KeyEventArgs e)
+        {
+            if (e.Key == Key.C && (Keyboard.Modifiers & ModifierKeys.Control) == ModifierKeys.Control)
+            {
+                if (sender is DataGrid grid &&
+                    DataContext is DebugResultViewModel vm)
+                {
+                    vm.CopySelectedCellsFromGrid(grid);
+                    e.Handled = true;
+                }
+            }
+        }
+
     }
 }

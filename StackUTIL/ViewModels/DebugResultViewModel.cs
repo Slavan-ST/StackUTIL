@@ -49,6 +49,7 @@ namespace DebugInterceptor.ViewModels
         [ObservableProperty]
         private bool _isExecuting = false;
         public IRelayCommand ClearResultsCommand { get; }
+        public IRelayCommand CopyFromResultsCommand { get; }
 
         // 🔹 Сервисы
         private readonly IDatabaseService _dbService;
@@ -84,8 +85,70 @@ namespace DebugInterceptor.ViewModels
                  canExecute: (record) => record != null && !IsExecuting  // 🔹 Кнопка активна только при валидной записи
              );
             ClearResultsCommand = new RelayCommand(() => ExecutionResults.Clear());
+            CopyFromResultsCommand = new RelayCommand<object>(CopyFromResults);
         }
 
+        // 🔹 Общий метод копирования выбранных ячеек из любого DataGrid
+        public void CopySelectedCellsFromGrid(System.Windows.Controls.DataGrid grid)
+        {
+            if (grid?.SelectedCells == null || !grid.SelectedCells.Any())
+                return;
+
+            var values = grid.SelectedCells
+                .Select(cell => GetCellValueFromGridCell(cell))
+                .Where(v => !string.IsNullOrEmpty(v))
+                .ToList();
+
+            if (values.Any())
+            {
+                System.Windows.Clipboard.SetText(string.Join("\t", values)); // Tab для удобной вставки в Excel
+                StatusMessage = $"✅ Скопировано {values.Count} значений из результатов";
+            }
+        }
+
+        // 🔹 Извлечение значения из ячейки результата (DataTable row)
+        private string? GetCellValueFromGridCell(System.Windows.Controls.DataGridCellInfo cell)
+        {
+            if (cell.Item is not System.Data.DataRowView rowView || cell.Column == null)
+                return null;
+
+            var column = cell.Column as System.Windows.Controls.DataGridBoundColumn;
+            if (column?.Binding is not System.Windows.Data.Binding binding || binding.Path?.Path is not string path)
+                return null;
+
+            // Для DataTable колонки — путь это имя колонки
+            var value = rowView[path];
+            return value == null || value == DBNull.Value ? null : value.ToString();
+        }
+
+        // 🔹 Обработчик команды копирования из результатов
+        private void CopyFromResults(object parameter)
+        {
+            // parameter может быть DataGrid или QueryResultDisplay
+            if (parameter is System.Windows.Controls.DataGrid grid)
+            {
+                CopySelectedCellsFromGrid(grid);
+            }
+            else if (parameter is QueryResultDisplay resultDisplay)
+            {
+                // Если передан результат — ищем соответствующий DataGrid в визуальном дереве
+                // (упрощённо: копируем все данные результата в буфер)
+                if (resultDisplay.Source?.Rows != null)
+                {
+                    var allValues = resultDisplay.Source.Rows
+                        .SelectMany(row => row.Values)
+                        .Where(v => v != null)
+                        .Select(v => v.ToString())
+                        .ToList();
+
+                    if (allValues.Any())
+                    {
+                        System.Windows.Clipboard.SetText(string.Join("\r\n", allValues));
+                        StatusMessage = $"✅ Скопировано {allValues.Count} значений";
+                    }
+                }
+            }
+        }
 
         // 🔹 Метод загрузки доступных подключений
         private void LoadAvailableConnections()
@@ -281,7 +344,7 @@ namespace DebugInterceptor.ViewModels
 
             return path switch
             {
-                "RowId" => record.RowId.ToString(),
+                "Row_Id" => record.RowId.ToString(),
                 "TableName" => record.TableName,
                 "GeneratedQuery" => record.GeneratedQuery,
                 _ => null
