@@ -1,6 +1,9 @@
-﻿using Tesseract;
-using Microsoft.Extensions.Logging;
+﻿using Microsoft.Extensions.Logging;
+using System.Drawing;
+using System.Drawing.Drawing2D;
+using System.Drawing.Imaging;
 using System.IO;
+using Tesseract;
 
 namespace DebugInterceptor.Services
 {
@@ -13,7 +16,6 @@ namespace DebugInterceptor.Services
         public OcrService(ILogger<OcrService> logger)
         {
             _logger = logger;
-
             _tessDataPath = Path.Combine(AppContext.BaseDirectory, "tessdata");
 
             if (!Directory.Exists(_tessDataPath))
@@ -21,37 +23,28 @@ namespace DebugInterceptor.Services
 
             var trainedData = Path.Combine(_tessDataPath, "rus.traineddata");
             if (!File.Exists(trainedData))
-                throw new FileNotFoundException($"rus.traineddata не найден: {trainedData}\n" +
-                    $"Скачайте с: https://github.com/tesseract-ocr/tessdata");
+                throw new FileNotFoundException($"rus.traineddata не найден: {trainedData}");
 
-            // 👇 EngineMode.Default — как в вашем примере
             _engine = new TesseractEngine(_tessDataPath, "rus", EngineMode.Default);
-
-            // 👇 Базовые настройки (можно расширить при необходимости)
             _engine.DefaultPageSegMode = PageSegMode.SingleBlock;
 
-            _logger.LogInformation("✅ Tesseract инициализирован (русский, EngineMode.Default)");
+            _logger.LogInformation("✅ Tesseract инициализирован");
         }
 
-        /// <summary>
-        /// Распознаёт текст из Bitmap (паттерн: Bitmap → файл → Pix → распознавание)
-        /// </summary>
         public string Recognize(Bitmap bitmap)
         {
             try
             {
-                // 👇 1. Сохраняем Bitmap во временный PNG-файл
+                using var processedBitmap = PreprocessImage(bitmap);
+
                 var tempImagePath = Path.Combine(Path.GetTempPath(),
                     $"ocr_input_{Guid.NewGuid():N}.png");
 
                 try
                 {
-                    bitmap.Save(tempImagePath, System.Drawing.Imaging.ImageFormat.Png);
+                    processedBitmap.Save(tempImagePath, System.Drawing.Imaging.ImageFormat.Png);
 
-                    // 👇 2. Загружаем через Pix.LoadFromFile (как в вашем примере)
                     using var pix = Pix.LoadFromFile(tempImagePath);
-
-                    // 👇 3. Распознаём
                     using var page = _engine.Process(pix);
 
                     var text = page.GetText()?.Trim() ?? string.Empty;
@@ -62,7 +55,6 @@ namespace DebugInterceptor.Services
 
                     _logger.LogDebug("📝 Распознанный текст:\n{Text}", text);
 
-                    // 👇 4. Сохраняем для отладки
                     var debugPath = Path.Combine(Path.GetTempPath(),
                         $"ocr_result_{DateTime.Now:yyyyMMdd_HHmmss}.txt");
                     File.WriteAllText(debugPath, text);
@@ -72,7 +64,6 @@ namespace DebugInterceptor.Services
                 }
                 finally
                 {
-                    // 👇 5. Удаляем временный файл изображения
                     if (File.Exists(tempImagePath))
                         File.Delete(tempImagePath);
                 }
@@ -82,6 +73,45 @@ namespace DebugInterceptor.Services
                 _logger.LogError(ex, "❌ Ошибка Tesseract OCR");
                 return string.Empty;
             }
+        }
+
+        /// <summary>
+        /// Минимальная предобработка - только легкое улучшение
+        /// </summary>
+        private Bitmap PreprocessImage(Bitmap source)
+        {
+            // 👇 Просто увеличиваем в 2 раза без сложной обработки
+            int newWidth = source.Width * 2;
+            int newHeight = source.Height * 2;
+
+            var result = new Bitmap(newWidth, newHeight, PixelFormat.Format24bppRgb);
+
+            using (var gfx = Graphics.FromImage(result))
+            {
+                gfx.InterpolationMode = InterpolationMode.HighQualityBicubic;
+                gfx.Clear(Color.White);
+                gfx.DrawImage(source, 0, 0, newWidth, newHeight);
+            }
+
+            // 👇 Очень легкая коррекция - только для улучшения читаемости
+            for (int y = 0; y < result.Height; y++)
+            {
+                for (int x = 0; x < result.Width; x++)
+                {
+                    Color pixel = result.GetPixel(x, y);
+                    int gray = (int)(pixel.R * 0.299 + pixel.G * 0.587 + pixel.B * 0.114);
+
+                    // 👇 Минимальная обработка - только очень светлое делаем белым
+                    if (gray > 240)
+                        gray = 255;
+                    // Остальное оставляем как есть
+
+                    Color newColor = Color.FromArgb(gray, gray, gray);
+                    result.SetPixel(x, y, newColor);
+                }
+            }
+
+            return result;
         }
 
         public void Dispose() => _engine?.Dispose();
