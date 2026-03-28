@@ -28,25 +28,15 @@ namespace DebugInterceptor.Services.Database
             _defaultTimeout = settings.Value.QueryTimeoutSeconds;
         }
 
-        public async Task<bool> TestConnectionAsync()
+        public async Task<List<Dictionary<string, object>>> ExecuteQueryAsync(
+    string sql,
+    string? connectionString = null,
+    int? timeoutSeconds = null)
         {
-            try
-            {
-                await using var connection = new SqlConnection(_connectionString);
-                await connection.OpenAsync();
-                _ = await connection.ExecuteScalarAsync("SELECT 1");
-                return true;
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "⚠ Не удалось подключиться к БД");
-                return false;
-            }
-        }
+            // 🔹 Используем переданный connection string или дефолтный
+            var cs = string.IsNullOrEmpty(connectionString) ? _connectionString : connectionString;
 
-        public async Task<List<Dictionary<string, object>>> ExecuteQueryAsync(string sql, int? timeoutSeconds = null)
-        {
-            await using var connection = new SqlConnection(_connectionString);
+            await using var connection = new SqlConnection(cs);
             await connection.OpenAsync();
 
             var command = new CommandDefinition(
@@ -74,7 +64,25 @@ namespace DebugInterceptor.Services.Database
             return results;
         }
 
-        public async Task<int> ExecuteNonQueryAsync(string sql, int? timeoutSeconds = null)
+        // 🔹 Аналогично обновляем TestConnectionAsync и ExecuteNonQueryAsync
+        public async Task<bool> TestConnectionAsync(string? connectionString = null)
+        {
+            var cs = string.IsNullOrEmpty(connectionString) ? _connectionString : connectionString;
+
+            try
+            {
+                await using var connection = new SqlConnection(cs);
+                await connection.OpenAsync();
+                _ = await connection.ExecuteScalarAsync("SELECT 1");
+                return true;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "⚠ Не удалось подключиться к БД");
+                return false;
+            }
+        }
+        public async Task<int> ExecuteNonQueryAsync(string sql, string? connectionString = null, int? timeoutSeconds = null)
         {
             await using var connection = new SqlConnection(_connectionString);
             await connection.OpenAsync();

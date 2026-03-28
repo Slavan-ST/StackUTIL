@@ -1,4 +1,5 @@
 ﻿using DebugInterceptor.Models.Enums;
+using StackUTIL.Models;
 using StackUTIL.Models.Enums;
 using System.IO;
 using System.Windows.Input;
@@ -75,5 +76,12 @@ namespace DebugInterceptor.Models
 
         /// <summary> Максимальное количество строк для отображения в гриде </summary>
         public int MaxDisplayRows { get; set; } = 1000;
+        /// <summary> Список доступных подключений для выбора пользователем </summary>
+        public List<DatabaseConnectionConfig> AvailableConnections { get; set; } = new()
+        {
+        };
+
+        /// <summary> Имя подключения по умолчанию (для авто-выбора при старте) </summary>
+        public string DefaultConnectionName { get; set; } = string.Empty;
     }
 }

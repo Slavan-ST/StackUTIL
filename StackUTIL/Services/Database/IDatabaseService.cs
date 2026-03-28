@@ -10,16 +10,18 @@ namespace DebugInterceptor.Services.Database
     /// </summary>
     public interface IDatabaseService
     {
-        /// <summary> Тип базы данных </summary>
         DatabaseType DatabaseType { get; }
 
-        /// <summary> Проверка доступности соединения </summary>
-        Task<bool> TestConnectionAsync();
+        Task<bool> TestConnectionAsync(string? connectionString = null);  // 🔹 Параметр для переопределения
 
-        /// <summary> Выполнение запроса, возвращающего данные </summary>
-        Task<List<Dictionary<string, object>>> ExecuteQueryAsync(string sql, int? timeoutSeconds = null);
+        Task<List<Dictionary<string, object>>> ExecuteQueryAsync(
+            string sql,
+            string? connectionString = null,  // 🔹 Параметр для переопределения
+            int? timeoutSeconds = null);
 
-        /// <summary> Выполнение запроса без возврата данных (INSERT/UPDATE/DELETE) </summary>
-        Task<int> ExecuteNonQueryAsync(string sql, int? timeoutSeconds = null);
+        Task<int> ExecuteNonQueryAsync(
+            string sql,
+            string? connectionString = null,  // 🔹 Параметр для переопределения
+            int? timeoutSeconds = null);
     }
 }

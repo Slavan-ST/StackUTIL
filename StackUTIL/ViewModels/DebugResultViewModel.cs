@@ -4,6 +4,8 @@ using DebugInterceptor.Models;
 using DebugInterceptor.Services.Database;
 using DebugInterceptor.Services.Query;
 using DebugInterceptor.Views;
+using Microsoft.Extensions.Options;
+using StackUTIL.Models;
 using StackUTIL.Services.Query;
 using System.Collections.ObjectModel;
 using System.Diagnostics;
@@ -15,6 +17,15 @@ namespace DebugInterceptor.ViewModels
 {
     public partial class DebugResultViewModel : ObservableObject
     {
+        // 🔹 Новые свойства
+        [ObservableProperty]
+        private ObservableCollection<DatabaseConnectionConfig> _availableConnections = new();
+
+        [ObservableProperty]
+        private DatabaseConnectionConfig _selectedConnection;
+
+        [ObservableProperty]
+        private string _connectionStatus = "🔌 Не подключено";
         // 🔹 Новые свойства (добавить в класс)
         [ObservableProperty]
         private ObservableCollection<QueryResultDisplay> _executionResults = new();
@@ -46,13 +57,21 @@ namespace DebugInterceptor.ViewModels
         public IRelayCommand CopySelectedCommand { get; }
         public IRelayCommand CloseCommand { get; }
         public IRelayCommand<QueryExecutionResult> CopyResultCommand { get; }
+        // 🔹 Поле для настроек
+        private readonly IOptions<DebugInterceptorSettings> _settings;
+
 
         public DebugResultViewModel(
             IDatabaseService dbService,
-            IQueryGenerator queryGenerator)
+            IQueryGenerator queryGenerator,
+            IOptions<DebugInterceptorSettings> settings)
         {
             _dbService = dbService;
             _queryGenerator = queryGenerator;
+            _settings = settings;  // 🔹 Сохраняем настройки в поле
+
+            // 🔹 Инициализация списка подключений
+            LoadAvailableConnections();
 
             CopySelectedCommand = new RelayCommand(CopySelectedValues);
             CloseCommand = new RelayCommand(() =>
@@ -67,24 +86,116 @@ namespace DebugInterceptor.ViewModels
             ClearResultsCommand = new RelayCommand(() => ExecutionResults.Clear());
         }
 
+
+        // 🔹 Метод загрузки доступных подключений
+        private void LoadAvailableConnections()
+        {
+            var configs = _settings.Value.AvailableConnections;
+
+            // Если список пуст — добавляем текущее подключение как опцию
+            if (!configs.Any())
+            {
+                configs.Add(new DatabaseConnectionConfig
+                {
+                    Name = "🔹 Текущее подключение",
+                    ConnectionString = _settings.Value.MsSqlConnectionString,
+                    DatabaseType = _settings.Value.DatabaseType,
+                    IsDefault = true
+                });
+            }
+
+            AvailableConnections = new ObservableCollection<DatabaseConnectionConfig>(configs);
+
+            // 🔹 Авто-выбор: по умолчанию или первое
+            SelectedConnection = AvailableConnections
+                .FirstOrDefault(c => c.Name == _settings.Value.DefaultConnectionName)
+                ?? AvailableConnections.FirstOrDefault();
+
+            // 🔹 Обновляем статус
+            UpdateConnectionStatus();
+        }
+
+        // 🔹 Обработчик смены подключения (вызывается из View при изменении SelectedConnection)
+        partial void OnSelectedConnectionChanged(DatabaseConnectionConfig value)
+        {
+            if (value == null) return;
+
+            UpdateConnectionStatus();
+
+            // 🔹 Опционально: протестировать подключение при смене
+            // TestSelectedConnectionAsync(); // асинхронно, без блокировки UI
+        }
+
+        // 🔹 Обновление статуса подключения для отображения
+        private void UpdateConnectionStatus()
+        {
+            if (SelectedConnection == null)
+            {
+                ConnectionStatus = "🔌 Не выбрано";
+                return;
+            }
+
+            var name = SelectedConnection.Name;
+            var server = ExtractServerName(SelectedConnection.ConnectionString);
+            var db = ExtractDatabaseName(SelectedConnection.ConnectionString);
+
+            ConnectionStatus = !string.IsNullOrEmpty(server)
+                ? $"🟢 {name} ({server}/{db})"
+                : $"🟡 {name} (проверка...)";
+        }
+
+        // 🔹 Вспомогательные методы для парсинга connection string
+        private string? ExtractServerName(string connectionString)
+        {
+            if (string.IsNullOrEmpty(connectionString)) return null;
+
+            var parts = connectionString.Split(';');
+            var serverPart = parts.FirstOrDefault(p => p.StartsWith("Server=", StringComparison.OrdinalIgnoreCase)
+                                                    || p.StartsWith("Data Source=", StringComparison.OrdinalIgnoreCase));
+
+            return serverPart?.Split('=')[1]?.Trim();
+        }
+
+        private string? ExtractDatabaseName(string connectionString)
+        {
+            if (string.IsNullOrEmpty(connectionString)) return null;
+
+            var parts = connectionString.Split(';');
+            var dbPart = parts.FirstOrDefault(p => p.StartsWith("Database=", StringComparison.OrdinalIgnoreCase)
+                                                || p.StartsWith("Initial Catalog=", StringComparison.OrdinalIgnoreCase));
+
+            return dbPart?.Split('=')[1]?.Trim();
+        }
+
+
         private async Task ExecuteQueryForRecordAsync(DebugRecord record)
         {
-            // 🔹 Дополнительная защита
             if (record == null || string.IsNullOrWhiteSpace(record.GeneratedQuery))
             {
                 StatusMessage = "⚠ Нечего выполнять: выберите запись с запросом";
                 return;
             }
 
+            if (SelectedConnection == null)
+            {
+                StatusMessage = "⚠ Выберите подключение к БД";
+                return;
+            }
 
             IsExecuting = true;
             StatusMessage = $"⏳ Выполнение: {record.TableName}...";
 
             try
             {
+                // 🔹 Получаем актуальный connection string для выбранного подключения
+                var connectionString = string.IsNullOrEmpty(SelectedConnection.ConnectionString)
+                    ? _settings.Value.MsSqlConnectionString  // Пустой = использовать дефолтный из настроек
+                    : SelectedConnection.ConnectionString;
+
                 var stopwatch = System.Diagnostics.Stopwatch.StartNew();
 
-                var rows = await _dbService.ExecuteQueryAsync(record.GeneratedQuery);
+                // 🔹 Выполняем запрос через сервис с переданным connection string
+                var rows = await _dbService.ExecuteQueryAsync(record.GeneratedQuery, connectionString);
 
                 stopwatch.Stop();
 
@@ -114,7 +225,6 @@ namespace DebugInterceptor.ViewModels
                 ExecutionResults.Add(new QueryResultDisplay(errorResult));
                 StatusMessage = $"❌ Ошибка: {ex.Message}";
 
-                // Логирование
                 System.Diagnostics.Debug.WriteLine($"[Query Error] {ex}");
             }
             finally

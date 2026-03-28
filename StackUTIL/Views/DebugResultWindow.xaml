@@ -31,6 +31,25 @@
             <TextBlock Text="📋 Записи:" FontWeight="Bold" VerticalAlignment="Center"/>
             <TextBlock Text="{Binding StatusMessage}" Margin="10,0,0,0" 
                        Foreground="Gray" VerticalAlignment="Center"/>
+            <!-- 🔹 ComboBox выбора подключения (справа) -->
+            <ComboBox ItemsSource="{Binding AvailableConnections}"
+              SelectedItem="{Binding SelectedConnection, Mode=TwoWay}"
+              Width="220" Margin="20,0,0,0"
+              ToolTip="Выберите базу данных для выполнения запросов"
+              HorizontalAlignment="Right"
+              VerticalContentAlignment="Center">
+
+                    <!-- 🔹 Отображение выбранного элемента (как в выпадающем списке) -->
+                    <ComboBox.ItemTemplate>
+                        <DataTemplate>
+                            <StackPanel Orientation="Horizontal">
+                                <TextBlock Text="{Binding Name}" FontWeight="SemiBold"/>
+                                <TextBlock Text=" • " Foreground="Gray" Margin="4,0"/>
+                                <TextBlock Text="{Binding DatabaseType}" Foreground="DarkBlue" FontSize="10"/>
+                            </StackPanel>
+                        </DataTemplate>
+                    </ComboBox.ItemTemplate>
+            </ComboBox>
         </StackPanel>
 
         <!-- Таблица записей -->
@@ -97,6 +116,12 @@
                 Command="{Binding ClearResultsCommand}"
                 Width="140" Margin="8,0,0,0"/>
 
+
+            <!-- 🔹 Статус подключения -->
+            <TextBlock Text="{Binding ConnectionStatus}" 
+               Margin="16,0,0,0" VerticalAlignment="Center" 
+               Foreground="Gray" FontSize="11" FontWeight="Normal"/>
+
             <!-- Индикатор выполнения -->
             <TextBlock Margin="8,0,0,0" VerticalAlignment="Center" Foreground="Gray">
                 <TextBlock.Style>
@@ -112,6 +137,7 @@
                     </Style>
                 </TextBlock.Style>
             </TextBlock>
+            
         </StackPanel>
 
         <!-- Разделитель -->
