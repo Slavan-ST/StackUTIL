@@ -1,4 +1,6 @@
-﻿using System;
+﻿using DebugInterceptor.Models;
+using DebugInterceptor.ViewModels;
+using System;
 using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Controls;
@@ -10,6 +12,8 @@ namespace DebugInterceptor.Views
 {
     public partial class DebugResultWindow : Window
     {
+
+
         // 🔹 WinAPI для принудительного получения фокуса
         [DllImport("user32.dll")]
         [return: MarshalAs(UnmanagedType.Bool)]
@@ -50,7 +54,24 @@ namespace DebugInterceptor.Views
             // Передаём фокус на DataGrid для работы клавиатуры (Escape, Ctrl+C и т.д.)
             RecordsGrid?.Focus();
         }
+        // 🔹 НОВЫЙ обработчик: синхронизация выбранной записи
+        private void DataGrid_OnSelectedCellsChanged(object sender, SelectedCellsChangedEventArgs e)
+        {
+            if (sender is not DataGrid grid) return;
+            if (grid.DataContext is not DebugResultViewModel vm) return;
 
+            // Берём первую выделенную ячейку и получаем её данные
+            var firstCell = grid.SelectedCells.FirstOrDefault();
+
+            if (firstCell.Item is DebugRecord record)
+            {
+                vm.SelectedRecord = record;
+            }
+            else
+            {
+                vm.SelectedRecord = null;
+            }
+        }
         // 🔹 Дополнительная страховка: фокус при каждой активации окна
         protected override void OnActivated(EventArgs e)
         {
@@ -76,19 +97,6 @@ namespace DebugInterceptor.Views
                     if (isCtrl || isShift) return;
 
                     CopyCellValue(cell, record);
-                }
-            }
-        }
-
-        private void DataGrid_OnSelectedCellsChanged(object sender, SelectedCellsChangedEventArgs e)
-        {
-            if (DataContext is DebugInterceptor.ViewModels.DebugResultViewModel vm &&
-                sender is System.Windows.Controls.DataGrid grid)
-            {
-                var count = grid.SelectedCells.Count;
-                if (count > 1)
-                {
-                    vm.StatusMessage = $"📋 Выделено ячеек: {count} (нажмите кнопку для копирования)";
                 }
             }
         }

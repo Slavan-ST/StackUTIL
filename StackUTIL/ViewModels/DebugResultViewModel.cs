@@ -15,6 +15,16 @@ namespace DebugInterceptor.ViewModels
 {
     public partial class DebugResultViewModel : ObservableObject
     {
+        // 🔹 Новые свойства (добавить в класс)
+        [ObservableProperty]
+        private ObservableCollection<QueryResultDisplay> _executionResults = new();
+
+        [ObservableProperty]
+        private DebugRecord _selectedRecord;
+
+        // 🔹 Новая команда
+        public IRelayCommand ExecuteQueryCommand { get; }
+
         [ObservableProperty]
         private ObservableCollection<DebugRecord> _records = new();
 
@@ -27,6 +37,7 @@ namespace DebugInterceptor.ViewModels
 
         [ObservableProperty]
         private bool _isExecuting = false;
+        public IRelayCommand ClearResultsCommand { get; }
 
         // 🔹 Сервисы
         private readonly IDatabaseService _dbService;
@@ -34,8 +45,6 @@ namespace DebugInterceptor.ViewModels
 
         public IRelayCommand CopySelectedCommand { get; }
         public IRelayCommand CloseCommand { get; }
-        public IRelayCommand ExecuteSelectedCommand { get; }
-        public IRelayCommand ExecuteAllCommand { get; }
         public IRelayCommand<QueryExecutionResult> CopyResultCommand { get; }
 
         public DebugResultViewModel(
@@ -51,11 +60,69 @@ namespace DebugInterceptor.ViewModels
                     .OfType<DebugResultWindow>()
                     .FirstOrDefault(w => w.DataContext == this)?.Close());
 
-            // 🔹 Новые команды
-            ExecuteSelectedCommand = new RelayCommand(ExecuteSelectedQueries, () => !IsExecuting);
-            ExecuteAllCommand = new RelayCommand(ExecuteAllQueries, () => !IsExecuting);
-            CopyResultCommand = new RelayCommand<QueryExecutionResult>(CopyResultValue);
+            ExecuteQueryCommand = new RelayCommand<DebugRecord>(
+                 execute: async (record) => await ExecuteQueryForRecordAsync(record),
+                 canExecute: (record) => record != null && !IsExecuting  // 🔹 Кнопка активна только при валидной записи
+             );
+            ClearResultsCommand = new RelayCommand(() => ExecutionResults.Clear());
         }
+
+        private async Task ExecuteQueryForRecordAsync(DebugRecord record)
+        {
+            // 🔹 Дополнительная защита
+            if (record == null || string.IsNullOrWhiteSpace(record.GeneratedQuery))
+            {
+                StatusMessage = "⚠ Нечего выполнять: выберите запись с запросом";
+                return;
+            }
+
+
+            IsExecuting = true;
+            StatusMessage = $"⏳ Выполнение: {record.TableName}...";
+
+            try
+            {
+                var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+
+                var rows = await _dbService.ExecuteQueryAsync(record.GeneratedQuery);
+
+                stopwatch.Stop();
+
+                var result = new QueryExecutionResult
+                {
+                    SourceRecord = record,
+                    ExecutedQuery = record.GeneratedQuery,
+                    Rows = rows,
+                    Status = QueryExecutionStatus.Success,
+                    ExecutionTimeMs = stopwatch.ElapsedMilliseconds
+                };
+
+                ExecutionResults.Add(new QueryResultDisplay(result));
+                StatusMessage = $"✅ {record.TableName}: {rows.Count} строк, {result.ExecutionTimeMs} мс";
+            }
+            catch (Exception ex)
+            {
+                var errorResult = new QueryExecutionResult
+                {
+                    SourceRecord = record,
+                    ExecutedQuery = record.GeneratedQuery,
+                    Error = ex.Message,
+                    Status = QueryExecutionStatus.Error,
+                    ExecutionTimeMs = 0
+                };
+
+                ExecutionResults.Add(new QueryResultDisplay(errorResult));
+                StatusMessage = $"❌ Ошибка: {ex.Message}";
+
+                // Логирование
+                System.Diagnostics.Debug.WriteLine($"[Query Error] {ex}");
+            }
+            finally
+            {
+                IsExecuting = false;
+            }
+        }
+
 
         public void LoadRecords(IEnumerable<DebugRecord> records)
         {
@@ -72,90 +139,6 @@ namespace DebugInterceptor.ViewModels
             StatusMessage = $"📋 Найдено записей: {records.Count()}";
         }
 
-        // 🔹 Выполнение выбранных запросов
-        private async void ExecuteSelectedQueries()
-        {
-            var window = System.Windows.Application.Current.Windows
-                .OfType<DebugResultWindow>()
-                .FirstOrDefault(w => w.DataContext == this);
-
-            if (window?.FindName("RecordsGrid") is not System.Windows.Controls.DataGrid grid)
-                return;
-
-            var selectedRecords = grid.SelectedItems.Cast<DebugRecord>().ToList();
-            if (!selectedRecords.Any())
-            {
-                StatusMessage = "⚠ Выделите записи для выполнения";
-                return;
-            }
-
-            await ExecuteQueriesAsync(selectedRecords);
-        }
-
-        // 🔹 Выполнение всех запросов
-        private async void ExecuteAllQueries()
-        {
-            if (!Records.Any())
-            {
-                StatusMessage = "⚠ Нет записей для выполнения";
-                return;
-            }
-            await ExecuteQueriesAsync(Records.ToList());
-        }
-
-        // 🔹 Общая логика выполнения
-        private async Task ExecuteQueriesAsync(List<DebugRecord> records)
-        {
-            IsExecuting = true;
-            StatusMessage = $"⏳ Выполнение {records.Count} запросов...";
-            QueryResults.Clear();
-
-            var sw = Stopwatch.StartNew();
-
-            foreach (var record in records)
-            {
-                var result = new QueryExecutionResult
-                {
-                    SourceRecord = record,
-                    ExecutedQuery = record.GeneratedQuery,
-                    Status = QueryExecutionStatus.Running
-                };
-                QueryResults.Add(result);
-
-                try
-                {
-                    var rows = await _dbService.ExecuteQueryAsync(record.GeneratedQuery);
-                    result.Rows = rows;
-                    result.Status = QueryExecutionStatus.Success;
-                    result.ExecutionTimeMs = sw.ElapsedMilliseconds;
-                }
-                catch (Exception ex)
-                {
-                    result.Error = ex.Message;
-                    result.Status = QueryExecutionStatus.Error;
-                    result.ExecutionTimeMs = sw.ElapsedMilliseconds;
-                }
-            }
-
-            sw.Stop();
-            IsExecuting = false;
-
-            var successCount = QueryResults.Count(r => r.Status == QueryExecutionStatus.Success);
-            StatusMessage = $"✅ Готово: {successCount}/{records.Count} за {sw.ElapsedMilliseconds} мс";
-        }
-
-        // 🔹 Копирование значения из результата
-        private void CopyResultValue(QueryExecutionResult? result)
-        {
-            if (result?.Rows?.Any() != true) return;
-
-            var firstRow = result.Rows.First();
-            var values = firstRow.Values.Select(v => v?.ToString()).Where(v => !string.IsNullOrEmpty(v));
-            var text = string.Join(" | ", values);
-
-            System.Windows.Clipboard.SetText(text);
-            StatusMessage = $"📋 Скопировано: {text[..Math.Min(50, text.Length)]}...";
-        }
 
         private void CopySelectedValues()
         {
